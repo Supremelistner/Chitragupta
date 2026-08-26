@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "document-mgmt-service"
+version = "0.1.0"
+description = "Document Management Microservice with MCP and health endpoints"
+readme = "README.md"
+requires-python = ">=3.10"
+
+[project.scripts]
+document-mgmt-service = "document_mgmt_service.__main__:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

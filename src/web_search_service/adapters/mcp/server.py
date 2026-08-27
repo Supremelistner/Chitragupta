@@ -2,7 +2,7 @@
 from __future__ import annotations
 import json, logging, sys
 from web_search_service.application.retrieval import RetrievalService
-from web_search_service.domain.models import ContentFormat, CrawlRequest, FetchRequest, ScrapeRequest, SearchQuery
+from web_search_service.domain.models import ContentFormat, CrawlRequest, DownloadRequest, FetchRequest, ScrapeRequest, SearchQuery
 
 logger = logging.getLogger("web_search_service.mcp")
 
@@ -48,12 +48,17 @@ class MCPServer:
             u = a.get("url","")
             if not u: raise ValueError("url required")
             r = self._retrieval.crawl(CrawlRequest(url=u, limit=int(a.get("limit",10)), depth=int(a.get("depth",2))))
-            return self._ok(rid, {"url":r.url,"provider":r.provider.value,"page_count":len(r.pages),"pages":[{"url":p.url,"title":p.title,"preview":p.content[:500]} for p in r.pages]})
+            return self._ok(rid, {"url":r.url,"provider":r.provider.value,"page_count":len(r.pages),"pages":[{"url":pg.url,"title":pg.title,"preview":pg.content[:500]} for pg in r.pages]})
         if n == "fetch_url":
             u = a.get("url","")
             if not u: raise ValueError("url required")
             r = self._retrieval.fetch(FetchRequest(url=u, format=ContentFormat(a.get("format","markdown"))))
             return self._ok(rid, {"url":r.url,"content":r.content[:5000],"status":r.status_code,"content_type":r.content_type,"latency_ms":r.latency_ms})
+        if n == "download_file":
+            u = a.get("url","")
+            if not u: raise ValueError("url required")
+            r = self._retrieval.download(DownloadRequest(url=u, filename=a.get("filename"), timeout_ms=int(a.get("timeout_ms", 30000)), max_size_bytes=int(a.get("max_size_bytes", 50*1024*1024)), request_id=a.get("request_id")))
+            return self._ok(rid, {"url":r.url,"status":r.status.value,"file_path":r.file_path,"filename":r.filename,"content_type":r.content_type,"content_length":r.content_length,"error":r.error,"latency_ms":r.latency_ms})
         if n == "health": return self._ok(rid, self._retrieval.health())
         return self._err(rid, -32602, f"Unknown: {n}")
 
@@ -63,28 +68,33 @@ class MCPServer:
             {"name":"web_scrape","description":"Scrape URL to markdown.","inputSchema":{"type":"object","properties":{"url":{"type":"string"},"format":{"type":"string"}},"required":["url"]}},
             {"name":"web_crawl","description":"Crawl a website.","inputSchema":{"type":"object","properties":{"url":{"type":"string"},"limit":{"type":"integer"},"depth":{"type":"integer"}},"required":["url"]}},
             {"name":"fetch_url","description":"Fetch URL content.","inputSchema":{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}},
+            {"name":"download_file","description":"Download a file from a URL to local storage.","inputSchema":{"type":"object","properties":{"url":{"type":"string"},"filename":{"type":"string"},"timeout_ms":{"type":"integer"},"max_size_bytes":{"type":"integer"}},"required":["url"]}},
             {"name":"health","description":"Health check.","inputSchema":{"type":"object","properties":{}}},
         ]
 
-    def _ok(self, rid, payload): return {"jsonrpc":"2.0","id":rid,"result":{"content":[{"type":"text","text":json.dumps(payload,default=str,separators=(",",":"))}],"isError":False}}
-    def _err(self, rid, code, msg): return {"jsonrpc":"2.0","id":rid,"error":{"code":code,"message":msg}}
+    def _ok(self, rid, payload):
+        return {"jsonrpc":"2.0","id":rid,"result":{"content":[{"type":"text","text":json.dumps(payload,default=str,separators=(",",":"))}],"isError":False}}
+
+    def _err(self, rid, code, msg):
+        return {"jsonrpc":"2.0","id":rid,"error":{"code":code,"message":msg}}
+
     def _read(self, r):
         h = {}
         while True:
             l = r.readline()
             if not l: return None
-            l = l.decode().rstrip("
-")
+            l = l.decode().rstrip()
             if not l: break
             if ":" in l:
-                k,v = l.split(":",1)
+                k, v = l.split(":", 1)
                 h[k.strip().lower()] = v.strip()
-        cl = int(h.get("content-length","0"))
+        cl = int(h.get("content-length", "0"))
         return json.loads(r.read(cl).decode()) if cl > 0 else None
+
     def _write(self, w, msg):
-        p = json.dumps(msg,separators=(",",":")).encode()
-        w.write(f"Content-Length: {len(p)}
-
-".encode())
+        p = json.dumps(msg, separators=(",", ":")).encode()
+        crlf = b"\r\n\r\n"
+        header = b"Content-Length: " + str(len(p)).encode() + crlf
+        w.write(header)
         w.write(p)
         w.flush()

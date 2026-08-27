@@ -106,3 +106,35 @@ class FetchResult:
     latency_ms: float | None = None
     request_id: str | None = None
     created_at: datetime | None = None
+
+
+# --- Download models ---
+
+
+class DownloadStatus(str, Enum):
+    SUCCESS = "success"
+    FAILED = "failed"
+    UNSUPPORTED = "unsupported"
+
+
+@dataclass(frozen=True, slots=True)
+class DownloadRequest:
+    url: str
+    filename: str | None = None
+    timeout_ms: int = 30000
+    max_size_bytes: int = 50 * 1024 * 1024  # 50 MB default
+    request_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DownloadResult:
+    url: str
+    status: DownloadStatus
+    file_path: str | None = None
+    filename: str | None = None
+    content_type: str | None = None
+    content_length: int | None = None
+    error: str | None = None
+    latency_ms: float | None = None
+    request_id: str | None = None
+    created_at: datetime | None = None

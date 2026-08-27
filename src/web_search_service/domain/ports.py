@@ -2,7 +2,8 @@
 from __future__ import annotations
 from typing import Protocol
 from web_search_service.domain.models import (
-    CrawlRequest, CrawlResult, FetchRequest, FetchResult,
+    CrawlRequest, CrawlResult, DownloadRequest, DownloadResult,
+    FetchRequest, FetchResult,
     ScrapeRequest, ScrapeResult, SearchQuery, SearchResponse,
 )
 
@@ -22,5 +23,11 @@ class WebScraperProvider(Protocol):
 
 class UrlFetcher(Protocol):
     def fetch(self, request: FetchRequest) -> FetchResult: ...
+    def ping(self) -> None: ...
+    def close(self) -> None: ...
+
+
+class FileDownloader(Protocol):
+    def download(self, request: DownloadRequest) -> DownloadResult: ...
     def ping(self) -> None: ...
     def close(self) -> None: ...

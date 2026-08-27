@@ -7,6 +7,7 @@ from web_search_service.application.retrieval import RetrievalDependencies, Retr
 from web_search_service.config import WebSearchConfig
 from web_search_service.infrastructure.firecrawl import FirecrawlAdapter
 from web_search_service.infrastructure.fetch import SimpleFetchAdapter
+from web_search_service.infrastructure.downloader import HttpDownloader
 
 def main():
     parser = argparse.ArgumentParser(description="Web Search Service")
@@ -19,13 +20,16 @@ def main():
 
     firecrawl = FirecrawlAdapter(api_key=config.firecrawl_api_key, base_url=config.firecrawl_base_url) if config.firecrawl_api_key else None
     fetcher = SimpleFetchAdapter()
+    downloader = HttpDownloader()
 
     retrieval = RetrievalService(RetrievalDependencies(
-        search_provider=firecrawl, scraper_provider=firecrawl, fetcher=fetcher))
+        search_provider=firecrawl, scraper_provider=firecrawl, fetcher=fetcher, downloader=downloader))
 
     print(f"Web Search Service on {config.http_host}:{config.http_port}")
-    print(f"  Firecrawl: {"enabled" if firecrawl else "disabled (no API key)"}")
+    fc_status = "enabled" if firecrawl else "disabled (no API key)"
+    print(f"  Firecrawl: {fc_status}")
     print(f"  Fetch: enabled")
+    print(f"  Download: enabled ({downloader._dir})")
 
     http_server = None; http_thread = None; stop = threading.Event()
     def shutdown(*_): stop.set(); http_server and http_server.stop()
@@ -44,6 +48,7 @@ def main():
         http_server and http_server.stop()
         http_thread and http_thread.join(timeout=5)
         fetcher.close()
+        downloader.close()
         firecrawl and firecrawl.close()
 
 if __name__ == "__main__": main()

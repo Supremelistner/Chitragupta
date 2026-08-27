@@ -3,10 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
+import logging
 from pathlib import Path
 import tempfile
 from typing import Any, Callable
 from uuid import uuid4
+
+logger = logging.getLogger("document_mgmt_service.ingestion")
 
 from document_mgmt_service.application.metadata import (
     classify_privacy,
@@ -25,11 +28,25 @@ from document_mgmt_service.domain.models import (
     SemanticIndexStatus,
 )
 from document_mgmt_service.domain.ports import FileStorage, OCRService, PostgreSQLDocumentRepository
+from document_mgmt_service.infrastructure.image_utils import resize_image
 
 
 class ModelProviderProtocol:
-    """Protocol for model service text extraction (optional dependency)."""
+    """Protocol for model service text extraction and classification (optional dependency)."""
     def extract_text(self, image_bytes: bytes, mime_type: str) -> str: ...
+    def classify_document(self, image_bytes: bytes, mime_type: str) -> dict[str, Any]: ...
+
+
+class DocumentValidatorProtocol:
+    """Protocol for document validation during ingestion."""
+    def validate(
+        self,
+        document_id: str,
+        version: int,
+        metadata: dict[str, Any],
+        document_type: str | None = None,
+        document_sub_type: str | None = None,
+    ) -> dict[str, Any]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,10 +56,24 @@ class IngestionDependencies:
     ocr: OCRService | None = None
     semantic_search: SemanticSearchService | None = None
     model_provider: ModelProviderProtocol | None = None
+    validator: DocumentValidatorProtocol | None = None
 
 
 class IngestionError(RuntimeError):
     pass
+
+
+def _parse_privacy(classification: str | None) -> DocumentPrivacyClassification:
+    """Map model's privacy classification string to our enum."""
+    if not classification:
+        return DocumentPrivacyClassification.OPEN_NOT_PUBLIC
+    mapping = {
+        "SENSITIVE": DocumentPrivacyClassification.SENSITIVE,
+        "PRIVATE": DocumentPrivacyClassification.PRIVATE,
+        "OPEN_NOT_PUBLIC": DocumentPrivacyClassification.OPEN_NOT_PUBLIC,
+        "OPEN": DocumentPrivacyClassification.OPEN,
+    }
+    return mapping.get(classification.upper(), DocumentPrivacyClassification.OPEN_NOT_PUBLIC)
 
 
 class IngestionService:
@@ -114,20 +145,41 @@ class IngestionService:
             repository.upsert_version(ocr_started)
 
             extracted_text = ""
+            classification: dict[str, Any] = {}
             if file_kind in {DocumentFileKind.PDF, DocumentFileKind.IMAGE}:
-                # Prefer model service for text extraction; fall back to OCR
                 model_provider = self._dependencies.model_provider
                 if model_provider is not None:
                     try:
                         mime = request.content_type or (
                             "image/jpeg" if file_kind == DocumentFileKind.IMAGE else "application/pdf"
                         )
+                        model_bytes = request.content
+                        model_mime = mime
+                        if file_kind == DocumentFileKind.IMAGE:
+                            model_bytes, model_mime = resize_image(
+                                request.content, mime,
+                            )
+                        # Text extraction
                         extracted_text = model_provider.extract_text(
-                            image_bytes=request.content,
-                            mime_type=mime,
+                            image_bytes=model_bytes,
+                            mime_type=model_mime,
                         )
+                        # Classification — identify what the document is
+                        try:
+                            classification = model_provider.classify_document(
+                                image_bytes=model_bytes,
+                                mime_type=model_mime,
+                            )
+                            logger.info(
+                                "Document %s classified as %s/%s (confidence=%.2f)",
+                                document_id,
+                                classification.get("document_type", "unknown"),
+                                classification.get("document_sub_type", "unknown"),
+                                classification.get("confidence", 0.0),
+                            )
+                        except Exception as cls_exc:
+                            logger.warning("Classification failed: %s", cls_exc)
                     except Exception:
-                        # Fall back to OCR if model service fails
                         if ocr is not None:
                             extracted_text = ocr.extract_text(temp_path)
                 elif ocr is not None:
@@ -145,20 +197,71 @@ class IngestionService:
                 request=request,
                 file_kind=file_kind,
                 extracted_text=extracted_text,
+                classification=classification,
             )
-            description = generate_safe_description(
-                filename=request.original_filename,
-                file_kind=file_kind,
-                extracted_text=extracted_text,
-                metadata=metadata,
-                description_hint=request.description_hint,
+
+            # ── VALIDATION STEP ──────────────────────────────────────
+            validator = self._dependencies.validator
+            if validator is not None:
+                try:
+                    validation = validator.validate(
+                        document_id=document_id,
+                        version=version,
+                        metadata=metadata,
+                    )
+                    # Merge validation results into metadata
+                    validation_status = validation.get("validation_status")
+                    metadata["validation_status"] = validation_status
+                    metadata["validation_risk_score"] = validation.get("validation_risk_score", 0.0)
+                    metadata["validation_matched_template"] = validation.get("validation_matched_template")
+                    metadata["validation_violations"] = validation.get("validation_violations", [])
+                    metadata["validation_temporal_status"] = validation.get("validation_temporal_status", "UNKNOWN")
+                    metadata["validation_temporal_tags"] = validation.get("validation_temporal_tags", [])
+                    metadata["validation_temporal_checks"] = validation.get("validation_temporal_checks", [])
+
+                    # If validation flagged the document, store the alert
+                    alert = validation.get("validation_alert")
+                    if alert:
+                        metadata["validation_alert"] = alert
+                        logger.warning(
+                            "Document %s v%d flagged by validator: status=%s risk=%.2f violations=%d temporal=%s",
+                            document_id, version,
+                            validation_status,
+                            validation.get("validation_risk_score", 0.0),
+                            len(validation.get("validation_violations", [])),
+                            validation.get("validation_temporal_status"),
+                        )
+                except Exception as exc:
+                    logger.warning("Validation failed for %s: %s", document_id, exc)
+                    metadata["validation_status"] = "ERROR"
+                    metadata["validation_error"] = str(exc)
+
+            # Use model classification for description/privacy when available
+            desc_from_model = classification.get("description", {})
+            privacy_from_model = classification.get("privacy", {})
+
+            description = (
+                desc_from_model.get("safe")
+                or desc_from_model.get("detailed")
+                or generate_safe_description(
+                    filename=request.original_filename,
+                    file_kind=file_kind,
+                    extracted_text=extracted_text,
+                    metadata=metadata,
+                    description_hint=request.description_hint,
+                )
             )
-            privacy = classify_privacy(
-                filename=request.original_filename,
-                content_type=request.content_type,
-                extracted_text=extracted_text,
-                description=description,
-                privacy_hint=request.privacy_hint,
+
+            privacy = (
+                _parse_privacy(privacy_from_model.get("classification"))
+                if privacy_from_model.get("classification")
+                else classify_privacy(
+                    filename=request.original_filename,
+                    content_type=request.content_type,
+                    extracted_text=extracted_text,
+                    description=description,
+                    privacy_hint=request.privacy_hint,
+                )
             )
             completed_record = self._replace_status(
                 ocr_complete,
@@ -350,9 +453,10 @@ class IngestionService:
         request: DocumentIngestionRequest,
         file_kind: DocumentFileKind,
         extracted_text: str,
+        classification: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         words = [word for word in extracted_text.split() if word.strip()]
-        return {
+        base = {
             **dict(request.metadata),
             "filename": request.original_filename,
             "content_type": request.content_type,
@@ -361,3 +465,11 @@ class IngestionService:
             "text_character_count": len(extracted_text),
             "text_word_count": len(words),
         }
+        # Merge model classification into metadata (replaces filename-based hints)
+        if classification and not classification.get("error"):
+            base["document_type"] = classification.get("document_type")
+            base["document_sub_type"] = classification.get("document_sub_type")
+            base["classification_confidence"] = classification.get("confidence")
+            base["classification_indicators"] = classification.get("key_indicators", [])
+            base["language_detected"] = classification.get("language_detected", [])
+        return base

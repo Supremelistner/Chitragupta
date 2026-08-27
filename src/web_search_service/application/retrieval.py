@@ -3,10 +3,11 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from web_search_service.domain.models import (
-    CrawlRequest, CrawlResult, FetchRequest, FetchResult,
+    CrawlRequest, CrawlResult, DownloadRequest, DownloadResult,
+    FetchRequest, FetchResult,
     ScrapeRequest, ScrapeResult, SearchQuery, SearchResponse, SearchProvider,
 )
-from web_search_service.domain.ports import UrlFetcher, WebScraperProvider, WebSearchProvider
+from web_search_service.domain.ports import FileDownloader, UrlFetcher, WebScraperProvider, WebSearchProvider
 
 logger = logging.getLogger("web_search_service.retrieval")
 
@@ -15,6 +16,7 @@ class RetrievalDependencies:
     search_provider: WebSearchProvider | None = None
     scraper_provider: WebScraperProvider | None = None
     fetcher: UrlFetcher | None = None
+    downloader: FileDownloader | None = None
 
 class RetrievalService:
     def __init__(self, dependencies):
@@ -49,9 +51,14 @@ class RetrievalService:
             raise RuntimeError("No fetcher configured")
         return self._deps.fetcher.fetch(request)
 
+    def download(self, request: DownloadRequest) -> DownloadResult:
+        if self._deps.downloader is None:
+            raise RuntimeError("No downloader configured")
+        return self._deps.downloader.download(request)
+
     def health(self):
         providers = {}
-        for name, provider in [("search", self._deps.search_provider), ("scraper", self._deps.scraper_provider), ("fetcher", self._deps.fetcher)]:
+        for name, provider in [("search", self._deps.search_provider), ("scraper", self._deps.scraper_provider), ("fetcher", self._deps.fetcher), ("downloader", self._deps.downloader)]:
             if provider is not None:
                 try:
                     provider.ping()

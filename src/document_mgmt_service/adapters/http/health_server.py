@@ -37,6 +37,11 @@ class _DocumentRequestHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.OK, self.health_service.report().to_dict())
             return
 
+        metadata_match = re.match(r"^/documents/(?P<document_id>[^/]+)/versions/(?P<version>\d+)/metadata$", urlparse(self.path).path)
+        if metadata_match:
+            self._handle_metadata_retrieval(metadata_match.group("document_id"), int(metadata_match.group("version")))
+            return
+
         match = _STATUS_PATH_RE.match(urlparse(self.path).path)
         if match:
             try:
@@ -118,6 +123,10 @@ class _DocumentRequestHandler(BaseHTTPRequestHandler):
                 self._handle_content_search()
                 return
 
+            if path == "/alerts":
+                self._handle_alert()
+                return
+
             evidence_match = re.match(r"^/documents/(?P<document_id>[^/]+)/versions/(?P<version>\d+)/evidence$", path)
             if evidence_match:
                 self._handle_evidence_search(evidence_match.group("document_id"), int(evidence_match.group("version")))
@@ -133,6 +142,62 @@ class _DocumentRequestHandler(BaseHTTPRequestHandler):
     def _handle_upload(self) -> None:
         try:
             request = self._parse_ingestion_request()
+
+            # Check for multi-page PDF
+            from document_mgmt_service.infrastructure.pdf_splitter import (
+                is_pdf, split_pdf,
+            )
+
+            if is_pdf(request.content_type, request.original_filename):
+                split_result = split_pdf(request.content)
+
+                if split_result.is_multi_page and split_result.pages:
+                    # Ingest each page as a separate document
+                    documents = []
+                    for page in split_result.pages:
+                        # Convert page image to bytes with PDF-like naming
+                        page_filename = f"{request.original_filename}_page{page.page_number}.png"
+                        page_request = DocumentIngestionRequest(
+                            original_filename=page_filename,
+                            content=page.image_bytes,
+                            content_type=page.content_type,
+                            document_id=None,  # New document_id per page
+                            privacy_hint=request.privacy_hint,
+                            description_hint=f"Page {page.page_number} of {split_result.total_pages}",
+                            metadata={
+                                **dict(request.metadata),
+                                "source_pdf": request.original_filename,
+                                "page_number": page.page_number,
+                                "total_pages": split_result.total_pages,
+                                "page_width": page.width,
+                                "page_height": page.height,
+                            },
+                        )
+                        result = self.ingestion_service.ingest(page_request)
+                        documents.append({
+                            "document_id": result.document_id,
+                            "version": result.version,
+                            "processing_status": result.processing_status.value,
+                            "privacy": result.privacy.value,
+                            "description": result.description,
+                            "metadata": result.metadata,
+                            "page_number": page.page_number,
+                            "total_pages": split_result.total_pages,
+                            "status_url": f"/documents/{result.document_id}/versions/{result.version}/status",
+                        })
+
+                    self._send_json(
+                        HTTPStatus.CREATED,
+                        {
+                            "status": "uploaded",
+                            "documents": documents,
+                            "total_pages": split_result.total_pages,
+                            "message": f"PDF split into {len(documents)} pages, each ingested separately.",
+                        },
+                    )
+                    return
+
+            # Single document (image or single-page PDF)
             result = self.ingestion_service.ingest(request)
             self._send_json(
                 HTTPStatus.CREATED,
@@ -189,6 +254,124 @@ class _DocumentRequestHandler(BaseHTTPRequestHandler):
             requestor=self._first_context(payload),
         )
         self._send_json(HTTPStatus.OK, results)
+
+    def _handle_alert(self) -> None:
+        """Handle validation alerts from the validator service.
+
+        Alerts are logged and optionally used to update document status.
+        """
+        payload = self._read_json_body()
+        document_id = payload.get("document_id")
+        version = payload.get("version")
+        severity = payload.get("severity", "INFO")
+        alert_type = payload.get("alert_type", "unknown")
+        message = payload.get("message", "")
+        risk_score = payload.get("risk_score", 0.0)
+        source = payload.get("source", "unknown")
+
+        if not document_id:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "document_id is required"})
+            return
+
+        logging.getLogger("document_mgmt_service.http").warning(
+            "Validation alert received: document=%s v%s severity=%s type=%s risk=%.2f source=%s message=%s",
+            document_id, version, severity, alert_type, risk_score, source, message,
+        )
+
+        # For CRITICAL alerts, update document metadata to flag it
+        if severity == "CRITICAL" and version is not None:
+            try:
+                record = self.access_service._load_record(document_id, int(version))
+                updated_metadata = dict(record.metadata)
+                updated_metadata["validation_alert"] = {
+                    "severity": severity,
+                    "alert_type": alert_type,
+                    "message": message,
+                    "risk_score": risk_score,
+                    "source": source,
+                    "timestamp": payload.get("timestamp"),
+                }
+                updated_metadata["validation_status"] = "INVALID"
+                # Update the record with the flagged metadata
+                from document_mgmt_service.domain.models import DocumentVersionRecord
+                flagged_record = DocumentVersionRecord(
+                    document_id=record.document_id,
+                    version=record.version,
+                    original_filename=record.original_filename,
+                    content_type=record.content_type,
+                    file_kind=record.file_kind,
+                    storage_key=record.storage_key,
+                    file_size_bytes=record.file_size_bytes,
+                    sha256=record.sha256,
+                    privacy=record.privacy,
+                    processing_status=record.processing_status,
+                    metadata=updated_metadata,
+                    description=record.description,
+                    extracted_text=record.extracted_text,
+                    extracted_text_excerpt=record.extracted_text_excerpt,
+                    semantic_index_status=record.semantic_index_status,
+                    semantic_indexed_at=record.semantic_indexed_at,
+                    chunk_count=record.chunk_count,
+                    created_at=record.created_at,
+                    updated_at=record.updated_at,
+                    completed_at=record.completed_at,
+                    error_message=f"VALIDATION_ALERT: {message}",
+                    model_extraction=record.model_extraction,
+                    description_safe=record.description_safe,
+                    description_detailed=record.description_detailed,
+                    extraction_confidence=record.extraction_confidence,
+                    document_type=record.document_type,
+                    document_sub_type=record.document_sub_type,
+                    language_primary=record.language_primary,
+                    pii_types=record.pii_types,
+                )
+                self.ingestion_service._repo.upsert_version(flagged_record)
+                logging.getLogger("document_mgmt_service.http").info(
+                    "Document %s v%s flagged as INVALID by validator service",
+                    document_id, version,
+                )
+            except Exception as exc:
+                logging.getLogger("document_mgmt_service.http").warning(
+                    "Could not flag document %s: %s", document_id, exc,
+                )
+
+        self._send_json(HTTPStatus.ACCEPTED, {
+            "alert_id": f"alert-{document_id}-{version}-{alert_type}",
+            "status": "received",
+            "document_id": document_id,
+            "version": version,
+        })
+
+    def _handle_metadata_retrieval(self, document_id: str, version: int) -> None:
+        """Return full document metadata including model extraction fields."""
+        try:
+            record = self.access_service._load_record(document_id, version)
+        except KeyError as exc:
+            self._send_json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
+            return
+        self._send_json(
+            HTTPStatus.OK,
+            {
+                "document_id": record.document_id,
+                "version": record.version,
+                "original_filename": record.original_filename,
+                "content_type": record.content_type,
+                "file_kind": record.file_kind.value,
+                "processing_status": record.processing_status.value,
+                "privacy": record.privacy.value,
+                "metadata": record.metadata,
+                "description": record.description,
+                "extracted_text": record.extracted_text,
+                "model_extraction": record.model_extraction,
+                "document_type": record.document_type,
+                "document_sub_type": record.document_sub_type,
+                "language_primary": record.language_primary,
+                "pii_types": record.pii_types,
+                "extraction_confidence": record.extraction_confidence,
+                "description_safe": record.description_safe,
+                "description_detailed": record.description_detailed,
+            },
+        )
 
     def _handle_ocr_retrieval(self, document_id: str, version: int) -> None:
         """Return OCR text and metadata for a document version."""

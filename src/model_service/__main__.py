@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import signal
 import threading
 
@@ -35,6 +36,22 @@ def _build_providers(config: ModelServiceConfig) -> dict[str, HuggingFaceProvide
         temperature=config.default_temperature,
         max_tokens=config.default_max_tokens,
     )
+
+    # Groq fallback (when HF credits exhausted)
+    if config.fallback_provider == "groq" and config.groq_api_key:
+        from model_service.infrastructure.groq_provider import GroqProviderAdapter
+        from model_service.infrastructure.fallback_provider import FallbackProvider
+        groq = GroqProviderAdapter(
+            api_key=config.groq_api_key,
+            model_id=config.groq_model_id,
+            timeout_seconds=config.request_timeout_seconds,
+            temperature=config.default_temperature,
+            max_tokens=config.default_max_tokens,
+        )
+        # Wrap the primary HF provider with fallback
+        primary = providers["huggingface"]
+        providers["huggingface"] = FallbackProvider(primary=primary, fallback=groq)
+        print(f"  Fallback: Groq ({config.groq_model_id}) — activates on HF 402/429")
 
     # Future providers can be added here:
     # if config.fireworks_api_key:

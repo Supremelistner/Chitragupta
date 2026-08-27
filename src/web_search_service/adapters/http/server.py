@@ -5,7 +5,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 from web_search_service.application.retrieval import RetrievalService
-from web_search_service.domain.models import ContentFormat, CrawlRequest, FetchRequest, ScrapeRequest, SearchQuery
+from web_search_service.domain.models import ContentFormat, CrawlRequest, DownloadRequest, FetchRequest, ScrapeRequest, SearchQuery
 
 logger = logging.getLogger("web_search_service.http")
 
@@ -35,6 +35,16 @@ class _Handler(BaseHTTPRequestHandler):
                 if not u: self._json(HTTPStatus.BAD_REQUEST,{"error":"url required"}); return
                 r=self.svc.fetch(FetchRequest(url=u,format=ContentFormat(b.get("format","markdown"))))
                 self._json(HTTPStatus.OK,{"url":r.url,"content":r.content[:5000],"status":r.status_code})
+            elif p=="/download":
+                u=b.get("url","")
+                if not u: self._json(HTTPStatus.BAD_REQUEST,{"error":"url required"}); return
+                r=self.svc.download(DownloadRequest(
+                    url=u,
+                    filename=b.get("filename"),
+                    timeout_ms=int(b.get("timeout_ms", 30000)),
+                    max_size_bytes=int(b.get("max_size_bytes", 50*1024*1024)),
+                ))
+                self._json(HTTPStatus.OK,{"url":r.url,"status":r.status.value,"file_path":r.file_path,"filename":r.filename,"content_type":r.content_type,"content_length":r.content_length,"error":r.error})
             else: self._json(HTTPStatus.NOT_FOUND,{"error":"Not found"})
         except Exception as e: logger.exception("Error"); self._json(HTTPStatus.INTERNAL_SERVER_ERROR,{"error":str(e)})
     def log_message(self, f, *a): logger.info(f, *a)

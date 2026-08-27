@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import signal
 import threading
+from typing import Any
 
 from document_mgmt_service.adapters.http.health_server import DocumentManagementHTTPServer
 from document_mgmt_service.adapters.mcp.server import MCPServer
@@ -11,6 +12,7 @@ from document_mgmt_service.application.health import HealthService
 from document_mgmt_service.application.ingestion import IngestionDependencies, IngestionService
 from document_mgmt_service.application.search import SemanticChunker, SemanticSearchService, TextEmbeddingService
 from document_mgmt_service.config import AppConfig
+from document_mgmt_service.infrastructure.document_validator import IngestionValidator
 from document_mgmt_service.infrastructure.memory import InMemoryDocumentRepository
 from document_mgmt_service.infrastructure.model_ocr import ModelOCRAdapter
 from document_mgmt_service.infrastructure.ocr import NullOCRAdapter
@@ -74,7 +76,7 @@ def _build_model_provider(config: AppConfig):
         )
 
         class _ModelClient:
-            """Wraps the HF adapter as a simple text extraction client."""
+            """Wraps the HF adapter for text extraction and classification."""
             def extract_text(self, image_bytes: bytes, mime_type: str) -> str:
                 request = InferenceRequest(
                     task=InferenceTaskType.TEXT_EXTRACTION,
@@ -85,6 +87,19 @@ def _build_model_provider(config: AppConfig):
                 if result.output.startswith("ERROR:"):
                     raise RuntimeError(result.output)
                 return result.output
+
+            def classify_document(self, image_bytes: bytes, mime_type: str) -> dict[str, Any]:
+                """Classify what the document is using the VL model."""
+                import json as _json
+                request = InferenceRequest(
+                    task=InferenceTaskType.DOCUMENT_CLASSIFICATION,
+                    image_bytes=image_bytes,
+                    image_mime_type=mime_type,
+                )
+                result = hf_adapter.infer(request)
+                if result.output.startswith("ERROR:"):
+                    raise RuntimeError(result.output)
+                return _json.loads(result.output)
 
         return _ModelClient()
     except Exception as exc:
@@ -114,6 +129,10 @@ def main() -> None:
         ocr = NullOCRAdapter()
         print("No model service configured — using NullOCR (no text extraction)")
 
+    # Build document validator
+    validator = IngestionValidator()
+    print(f"Validator loaded with {len(validator._registry.list_all())} document templates")
+
     access_service = DocumentAccessService(
         repository=repository,
         storage=storage,
@@ -125,6 +144,8 @@ def main() -> None:
             storage=storage,
             ocr=ocr,
             semantic_search=semantic_search,
+            model_provider=model_provider,
+            validator=validator,
         )
     )
     health_service = HealthService(config=config)

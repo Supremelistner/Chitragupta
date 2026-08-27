@@ -61,6 +61,11 @@ class ModelServiceConfig:
     default_max_tokens: int
     request_timeout_seconds: int
 
+    # Groq fallback
+    groq_api_key: str | None
+    groq_model_id: str
+    fallback_provider: str | None  # "groq" to enable fallback
+
     # Shared filesystem with document service (for dev)
     file_storage_root: str | None
 
@@ -87,6 +92,9 @@ class ModelServiceConfig:
             default_temperature=_env_float("MODEL_SERVICE_TEMPERATURE", 0.1),
             default_max_tokens=_env_int("MODEL_SERVICE_MAX_TOKENS", 2048),
             request_timeout_seconds=_env_int("MODEL_SERVICE_TIMEOUT_SECONDS", 30),
+            groq_api_key=_env("GROQ_API_KEY"),
+            groq_model_id=_env("GROQ_VL_MODEL", "qwen/qwen3.6-27b") or "qwen/qwen3.6-27b",
+            fallback_provider=_env("MODEL_SERVICE_FALLBACK_PROVIDER"),
             file_storage_root=_env("MODEL_SERVICE_FILE_STORAGE_ROOT"),
         )
 

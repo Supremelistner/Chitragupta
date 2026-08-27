@@ -68,6 +68,9 @@ class DocumentMCPInterfaceTests(unittest.TestCase):
             semantic_chunk_overlap=20,
             file_storage_root=Path(self.tempdir.name),
             ocr_enabled=True,
+            huggingface_token=None,
+            huggingface_model_id="test-model",
+            request_timeout_seconds=30,
         )
 
     def _build_server(self, ocr: StaticOCR) -> MCPServer:

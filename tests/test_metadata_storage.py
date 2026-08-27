@@ -541,6 +541,9 @@ class TestStorageConfigAbstraction(unittest.TestCase):
             semantic_chunk_size=100, semantic_chunk_overlap=20,
             file_storage_root=Path("/tmp/test-storage"),
             ocr_enabled=False,
+            huggingface_token=None,
+            huggingface_model_id="test-model",
+            request_timeout_seconds=30,
         )
         self.assertEqual(config.file_storage_root, Path("/tmp/test-storage"))
 

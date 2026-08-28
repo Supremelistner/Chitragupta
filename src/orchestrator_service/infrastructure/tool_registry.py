@@ -45,11 +45,11 @@ _TOOL_DEFINITIONS: dict[str, tuple[ServiceTarget, str, dict[str, Any], Confirmat
     ),
     "search_documents": (
         ServiceTarget.DOCUMENT,
-        "Search documents by semantic similarity. Returns document IDs and summaries.",
+        "Search documents by semantic similarity. Returns document IDs and summaries. ALWAYS call this FIRST when the user mentions a document by name or description — use the returned document_id and version for all other tool calls.",
         {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "Search query"},
+                "query": {"type": "string", "description": "What the user is looking for, e.g. 'Aadhaar card', 'marksheet', 'insurance policy'"},
                 "limit": {"type": "integer", "description": "Max results (default 10)"},
             },
             "required": ["query"],
@@ -73,12 +73,12 @@ _TOOL_DEFINITIONS: dict[str, tuple[ServiceTarget, str, dict[str, Any], Confirmat
     ),
     "get_document_metadata": (
         ServiceTarget.DOCUMENT,
-        "Get processing status and metadata for a document version.",
+        "Get processing status and metadata for a document version. You MUST first call search_documents or list_documents to find the document_id.",
         {
             "type": "object",
             "properties": {
-                "document_id": {"type": "string"},
-                "version": {"type": "integer"},
+                "document_id": {"type": "string", "description": "Get this from search_documents or list_documents results"},
+                "version": {"type": "integer", "description": "Get this from search_documents or list_documents results"},
             },
             "required": ["document_id", "version"],
         },
@@ -86,12 +86,12 @@ _TOOL_DEFINITIONS: dict[str, tuple[ServiceTarget, str, dict[str, Any], Confirmat
     ),
     "get_document_description": (
         ServiceTarget.DOCUMENT,
-        "Get the safe (non-PII) description for a document version.",
+        "Get the safe (non-PII) description for a document version. You MUST first call search_documents or list_documents to find the document_id.",
         {
             "type": "object",
             "properties": {
-                "document_id": {"type": "string"},
-                "version": {"type": "integer"},
+                "document_id": {"type": "string", "description": "Get this from search_documents or list_documents results"},
+                "version": {"type": "integer", "description": "Get this from search_documents or list_documents results"},
             },
             "required": ["document_id", "version"],
         },
@@ -99,12 +99,12 @@ _TOOL_DEFINITIONS: dict[str, tuple[ServiceTarget, str, dict[str, Any], Confirmat
     ),
     "get_evidence": (
         ServiceTarget.DOCUMENT,
-        "Retrieve supporting evidence (text chunks) for a document. System will ask user to confirm before retrieving.",
+        "Retrieve supporting evidence (text chunks) for a document. You MUST first call search_documents to find the document_id. System will ask user to confirm before retrieving.",
         {
             "type": "object",
             "properties": {
-                "document_id": {"type": "string"},
-                "version": {"type": "integer"},
+                "document_id": {"type": "string", "description": "Get this from search_documents results"},
+                "version": {"type": "integer", "description": "Get this from search_documents results"},
                 "query": {"type": "string"},
                 "limit": {"type": "integer"},
             },
@@ -114,12 +114,12 @@ _TOOL_DEFINITIONS: dict[str, tuple[ServiceTarget, str, dict[str, Any], Confirmat
     ),
     "get_document_ocr": (
         ServiceTarget.DOCUMENT,
-        "Get OCR-extracted text from a document (e.g., Aadhaar number, marks, text). System will ask user to confirm before retrieving — always call this tool when the user asks for document content.",
+        "Get OCR-extracted text from a document (e.g., Aadhaar number, marks, text). You MUST first call search_documents to find the document_id and version, then call this tool with those IDs. System will ask user to confirm before retrieving.",
         {
             "type": "object",
             "properties": {
-                "document_id": {"type": "string"},
-                "version": {"type": "integer"},
+                "document_id": {"type": "string", "description": "Get this from search_documents or list_documents results"},
+                "version": {"type": "integer", "description": "Get this from search_documents or list_documents results"},
             },
             "required": ["document_id", "version"],
         },
@@ -128,12 +128,12 @@ _TOOL_DEFINITIONS: dict[str, tuple[ServiceTarget, str, dict[str, Any], Confirmat
     # ── Document: file retrieval (requires confirmation) ──────────────
     "get_document": (
         ServiceTarget.DOCUMENT,
-        "Download and retrieve the actual document file. System will ask user to confirm before downloading — call this when user asks to see/download the file.",
+        "Download and retrieve the actual document file. You MUST first call search_documents or list_documents to find the document_id, then call this tool. System will ask user to confirm before downloading.",
         {
             "type": "object",
             "properties": {
-                "document_id": {"type": "string"},
-                "version": {"type": "integer"},
+                "document_id": {"type": "string", "description": "Get this from search_documents or list_documents results"},
+                "version": {"type": "integer", "description": "Get this from search_documents or list_documents results"},
             },
             "required": ["document_id", "version"],
         },
@@ -141,12 +141,12 @@ _TOOL_DEFINITIONS: dict[str, tuple[ServiceTarget, str, dict[str, Any], Confirmat
     ),
     "get_page": (
         ServiceTarget.DOCUMENT,
-        "Retrieve a specific page from a document. Requires user confirmation.",
+        "Retrieve a specific page from a document. You MUST first call search_documents or list_documents to find the document_id. Requires user confirmation.",
         {
             "type": "object",
             "properties": {
-                "document_id": {"type": "string"},
-                "version": {"type": "integer"},
+                "document_id": {"type": "string", "description": "Get this from search_documents or list_documents results"},
+                "version": {"type": "integer", "description": "Get this from search_documents or list_documents results"},
                 "page_number": {"type": "integer"},
             },
             "required": ["document_id", "version", "page_number"],
@@ -155,12 +155,12 @@ _TOOL_DEFINITIONS: dict[str, tuple[ServiceTarget, str, dict[str, Any], Confirmat
     ),
     "get_document_image": (
         ServiceTarget.DOCUMENT,
-        "Retrieve the raw image/file bytes. Requires user confirmation.",
+        "Retrieve the raw image/file bytes. You MUST first call search_documents or list_documents to find the document_id. Requires user confirmation.",
         {
             "type": "object",
             "properties": {
-                "document_id": {"type": "string"},
-                "version": {"type": "integer"},
+                "document_id": {"type": "string", "description": "Get this from search_documents or list_documents results"},
+                "version": {"type": "integer", "description": "Get this from search_documents or list_documents results"},
             },
             "required": ["document_id", "version"],
         },
@@ -168,12 +168,12 @@ _TOOL_DEFINITIONS: dict[str, tuple[ServiceTarget, str, dict[str, Any], Confirmat
     ),
     "request_sensitive_access": (
         ServiceTarget.DOCUMENT,
-        "Request approval for accessing sensitive document data. System will ask user to confirm — call this when user asks for ID numbers, personal info, etc.",
+        "Request approval for accessing sensitive document data. You MUST first call search_documents to find the document_id. System will ask user to confirm — call this when user asks for ID numbers, personal info, etc.",
         {
             "type": "object",
             "properties": {
-                "document_id": {"type": "string"},
-                "version": {"type": "integer"},
+                "document_id": {"type": "string", "description": "Get this from search_documents results"},
+                "version": {"type": "integer", "description": "Get this from search_documents results"},
                 "intent": {"type": "string"},
                 "query": {"type": "string"},
             },

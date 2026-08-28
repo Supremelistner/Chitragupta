@@ -62,12 +62,9 @@ class QwenLLMProvider(LLMProvider):
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
-            # Add temperature and seed to reduce safety refusals
             kwargs["temperature"] = temperature if temperature is not None else self._temperature
-            # For Groq: add extra params to relax guardrails
-            if hasattr(client, '_resolve_url') or True:
-                kwargs.setdefault("extra_body", {})
-                kwargs["extra_body"]["top_p"] = 0.95
+            kwargs.setdefault("extra_body", {})
+            kwargs["extra_body"]["top_p"] = 0.95
 
         logger.debug(
             "LLM call: %d messages, %d tools, model=%s",

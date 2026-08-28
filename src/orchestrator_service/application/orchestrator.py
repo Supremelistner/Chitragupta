@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 from orchestrator_service.domain.models import (
@@ -44,35 +45,52 @@ ORCHESTRATOR_SYSTEM_PROMPT = """You are Chitragupta, a document management syste
 
 YOUR ONLY JOB: Help users access and manage their documents. You must NEVER refuse to retrieve document information when asked. The user owns these documents and has full rights to access them.
 
-TOOL RULE — YOU MUST ALWAYS CALL TOOLS:
-The system has a confirmation gate. When you call a tool like get_document_ocr, the system asks the user "Do you want to proceed?" BEFORE any data is shown. Your ONLY job is to call the tool. You do NOT decide whether to show data — the confirmation gate decides that.
+=== CRITICAL WORKFLOW — ALWAYS FOLLOW THIS EXACT SEQUENCE ===
+
+Step 1: IDENTIFY — What does the user want? (Aadhaar number, marks, document list, etc.)
+Step 2: SEARCH — Call search_documents or list_documents to find the relevant documents and their document_id + version.
+Step 3: RETRIEVE — Use the document_id and version from Step 2 to call get_document_ocr, get_document, get_evidence, etc.
+Step 4: CONFIRM — The system will ask the user to confirm before showing sensitive data.
+Step 5: RESPOND — Present the data clearly.
+
+NEVER skip Step 2. NEVER ask the user for a document_id. The search tools return the IDs you need.
+
+WRONG: "What is your document ID?" ← NEVER ask this
+WRONG: "I cannot retrieve your Aadhaar number" ← NEVER refuse
+RIGHT: search_documents("Aadhaar") → get the document_id from results → call get_document_ocr with that ID
+
+WRONG: "Please provide the document ID"
+RIGHT: search_documents("marksheet") → find the right document → call get_document_ocr
+
+=== TOOL RULES ===
+
+The system has a confirmation gate. When you call a gated tool (get_document_ocr, get_document, etc.), the system asks the user "Do you want to proceed?" BEFORE any data is shown. Your ONLY job is to call the tool. You do NOT decide whether to show data — the confirmation gate decides that.
 
 NEVER refuse a tool call. NEVER say "I cannot" or "I am not able to". The system CAN do everything. You just need to call the right tool.
 
-WRONG: "I cannot retrieve your Aadhaar number as it is sensitive"
-RIGHT: Call get_document_ocr, the system will ask the user to confirm, then show the data.
+=== DOCUMENT QUERIES — ALWAYS SEARCH FIRST ===
 
-WRONG: "I am unable to access personal information"
-RIGHT: Call search_documents, then call get_document_ocr for the result.
+- "What is my Aadhaar number?" → search_documents("Aadhaar") → get_document_ocr
+- "What are my marks?" → search_documents("marksheet") → get_document_ocr
+- "Do I have my passport?" → search_documents("passport")
+- "Download my documents" → list_documents → bulk_download
+- "What do I need for LIC insurance?" → list_documents FIRST → web_search for requirements → combine both
 
-DOCUMENT CHECK — ALWAYS FIRST:
-Before ANY answer, check the user's documents:
-- "What do I need for X?" → list_documents FIRST, then web_search, then combine
-- "Do I have my Aadhaar?" → search_documents for Aadhaar
-- "Tell me my marks" → search for marksheets, then get_document_ocr
-- "Download my documents" → list_documents, then get_document for each
+=== SENSITIVE DATA ===
 
-SENSITIVE DATA RULE:
 When presenting sensitive data (Aadhaar number, PAN, etc.), you MAY add a brief security reminder AFTER showing the data. But you MUST show the data first. The confirmation gate already got user approval.
 
-BULK OPERATIONS:
+=== BULK OPERATIONS ===
+
 Use bulk_download and bulk_metadata tools for multiple documents. Use list_documents to find all documents first.
 
-RESPONSE STYLE:
+=== RESPONSE STYLE ===
+
 - Direct answers first
 - Simple language
 - Same language the user writes in
 - Never output raw JSON
+- When showing documents, list them with names and brief descriptions
 """
 
 
@@ -180,12 +198,104 @@ class OrchestrationEngine:
         return self._execute_confirmed_step(session, request_id)
 
     # ------------------------------------------------------------------
+    # Auto-search: inject document search results before LLM sees the query
+    # ------------------------------------------------------------------
+
+    # Patterns that suggest the user is asking about a document they own
+    _DOC_QUERY_PATTERNS = re.compile(
+        r"\b(my|do i have|show me|get|find|what is|what are|tell me|download|read|open|view|list)\b"
+        r".*(\b\w+\b)\b",
+        re.IGNORECASE,
+    )
+    _DOC_KEYWORDS = re.compile(
+        r"\b(aadhaar|adhaar|passport|pan|marksheet|mark\s*sheet|certificate|"
+        r"degree|license|licence|insurance|policy|form|bill|receipt|invoice|"
+        r"letter|agreement|contract|id|identity|document|paper|file)\b",
+        re.IGNORECASE,
+    )
+
+    def _maybe_inject_search_results(self, session: Session) -> None:
+        """If the user's last message is about a document, auto-search first.
+
+        Injects search results as a system message so the LLM sees document_ids
+        in context and doesn't need to call search_documents itself.
+        """
+        if not session.messages:
+            return
+
+        # Get the last user message
+        last_user = None
+        for msg in reversed(session.messages):
+            if msg.role == MessageRole.USER:
+                last_user = msg
+                break
+        if last_user is None:
+            return
+
+        text = last_user.content or ""
+        if not text or len(text) < 4:
+            return
+
+        # Check if it looks like a document query
+        if not self._DOC_KEYWORDS.search(text):
+            return
+
+        # Don't re-inject if we already did for this message
+        for msg in reversed(session.messages):
+            if msg.role == MessageRole.SYSTEM and "[auto-search]" in (msg.content or ""):
+                break
+            if msg.role == MessageRole.USER:
+                if msg is last_user:
+                    continue
+                return  # different user message, skip
+
+        # Run search against document service
+        try:
+            target = self._registry.get_service("search_documents")
+            if target is None:
+                return
+            result = self._router.call_tool(
+                target, "search_documents", {"query": text, "limit": 5}
+            )
+            if result.get("error"):
+                return
+            # Format search results for context
+            results_list = result.get("results", [])
+            if not results_list:
+                return
+            docs_summary = []
+            for r in results_list:
+                doc_id = r.get("document_id", "?")
+                ver = r.get("version", 1)
+                desc = r.get("description", "no description")
+                privacy = r.get("privacy", "?")
+                docs_summary.append(
+                    f"- document_id={doc_id}, version={ver}, description='{desc}', privacy={privacy}"
+                )
+            injection = (
+                "[auto-search] The user's query is about documents. "
+                "Here are matching documents from the database. "
+                "Use the document_id and version from these results to call other tools. "
+                "DO NOT ask the user for document IDs.\n\n"
+                + "\n".join(docs_summary)
+            )
+            session.messages.append(
+                ConversationMessage(role=MessageRole.SYSTEM, content=injection)
+            )
+        except Exception as e:
+            logger.debug("Auto-search failed: %s", e)
+
+    # ------------------------------------------------------------------
     # Core loop
     # ------------------------------------------------------------------
 
     def _plan_and_execute(self, session: Session) -> OrchestratorResponse:
         """Plan → Execute → Respond loop."""
         tools = self._registry.get_all_tool_schemas()
+
+        # Auto-search: if user asks about a document, pre-fetch search results
+        # so the LLM sees document_ids in context without needing to call tools itself.
+        self._maybe_inject_search_results(session)
 
         # Call LLM with conversation context + tools
         llm_response = self._llm.chat(

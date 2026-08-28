@@ -243,28 +243,32 @@ def create_app(
 
             result = resp.json()
 
-            # Simplified response — just name and description
+            # Upload responses are intentionally terse; generated descriptions
+            # stay available through metadata/description endpoints.
             if "documents" in result:
                 docs = [
                     {
                         "document_id": d.get("document_id"),
-                        "name": d.get("description") or d.get("metadata", {}).get("document_sub_type", "Document"),
-                        "description": d.get("description", "Processing..."),
+                        "version": d.get("version"),
+                        "processing_status": d.get("processing_status"),
+                        "page_number": d.get("page_number"),
+                        "total_pages": d.get("total_pages"),
                     }
                     for d in result["documents"]
                 ]
                 return {
-                    "status": "uploaded",
+                    "status": "successful",
+                    "message": "Document uploaded successfully.",
                     "documents": docs,
                     "count": len(docs),
                 }
 
-            doc_type = result.get("metadata", {}).get("document_sub_type") or result.get("description", "Document")
             return {
-                "status": "uploaded",
+                "status": "successful",
+                "message": "Document uploaded successfully.",
                 "document_id": result.get("document_id"),
-                "name": doc_type,
-                "description": result.get("description", "Processing..."),
+                "version": result.get("version"),
+                "processing_status": result.get("processing_status"),
             }
 
         except HTTPException:

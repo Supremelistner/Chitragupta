@@ -540,6 +540,8 @@ class TestStorageConfigAbstraction(unittest.TestCase):
             qdrant_collection_name="test", semantic_embedding_dimension=32,
             semantic_chunk_size=100, semantic_chunk_overlap=20,
             file_storage_root=Path("/tmp/test-storage"),
+            sqlite_db_path=None,
+            encryption_master_key="",
             ocr_enabled=False,
             huggingface_token=None,
             huggingface_model_id="test-model",

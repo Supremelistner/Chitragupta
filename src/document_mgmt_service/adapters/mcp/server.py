@@ -106,14 +106,6 @@ class MCPServer:
                                 "request_sensitive_access",
                                 "Request approval for sensitive access without bypassing policy.",
                             ),
-                            self._tool_spec(
-                                "get_document_ocr",
-                                "Return OCR-extracted text and metadata for a document version.",
-                            ),
-                            self._tool_spec(
-                                "get_document_image",
-                                "Return raw document image/file bytes for a document version.",
-                            ),
                         ]
                     },
                 )
@@ -260,56 +252,6 @@ class MCPServer:
                 ),
             )
 
-        if name == "get_document_ocr":
-            document_id = str(arguments.get("document_id") or "")
-            version = int(arguments.get("version"))
-            try:
-                record = self._access_service._load_record(document_id, version)
-            except KeyError as exc:
-                return self._error(request_id, -32602, str(exc))
-            return self._tool_result(
-                request_id,
-                {
-                    "document_id": record.document_id,
-                    "version": record.version,
-                    "processing_status": record.processing_status.value,
-                    "extracted_text": record.extracted_text,
-                    "extracted_text_excerpt": record.extracted_text_excerpt,
-                    "file_kind": record.file_kind.value,
-                    "original_filename": record.original_filename,
-                    "content_type": record.content_type,
-                    "metadata": record.metadata,
-                    "description": record.description,
-                    "privacy": record.privacy.value,
-                },
-            )
-
-        if name == "get_document_image":
-            document_id = str(arguments.get("document_id") or "")
-            version = int(arguments.get("version"))
-            try:
-                response = self._access_service.get_document(
-                    document_id,
-                    version,
-                    requestor=str(arguments.get("requestor")) if arguments.get("requestor") else None,
-                )
-                return self._tool_result(request_id, {
-                    "document_id": document_id,
-                    "version": version,
-                    "filename": response.payload.get("filename"),
-                    "content_type": response.payload.get("content_type"),
-                    "storage_key": response.payload.get("storage_key"),
-                    "content_base64": response.payload.get("content_base64"),
-                    "access_action": response.decision.action.value,
-                    "access_reason": response.decision.reason,
-                })
-            except ApprovalRequiredError as exc:
-                return self._tool_result(request_id, {"access_action": exc.decision.action.value, "access_reason": exc.decision.reason, "content_base64": None})
-            except AccessDeniedError as exc:
-                return self._tool_result(request_id, {"access_action": exc.decision.action.value, "access_reason": exc.decision.reason, "content_base64": None})
-            except KeyError as exc:
-                return self._error(request_id, -32602, str(exc))
-
         return self._error(request_id, -32602, f"Unknown tool: {name}")
 
     def _ingest_document(self, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -333,14 +275,11 @@ class MCPServer:
             )
         )
         return {
+            "status": "successful",
+            "message": "Document uploaded successfully.",
             "document_id": result.document_id,
             "version": result.version,
             "processing_status": result.processing_status.value,
-            "privacy": result.privacy.value,
-            "description": result.description,
-            "metadata": result.metadata,
-            "storage_key": result.storage_key,
-            "sha256": result.sha256,
             "semantic_index_status": result.semantic_index_status.value,
             "chunk_count": result.chunk_count,
         }
@@ -464,27 +403,6 @@ class MCPServer:
                     "requestor": {"type": "string"},
                 },
                 "required": ["document_id", "version", "intent"],
-                "additionalProperties": False,
-            }
-        elif name == "get_document_ocr":
-            schema = {
-                "type": "object",
-                "properties": {
-                    "document_id": {"type": "string"},
-                    "version": {"type": "integer"},
-                },
-                "required": ["document_id", "version"],
-                "additionalProperties": False,
-            }
-        elif name == "get_document_image":
-            schema = {
-                "type": "object",
-                "properties": {
-                    "document_id": {"type": "string"},
-                    "version": {"type": "integer"},
-                    "requestor": {"type": "string"},
-                },
-                "required": ["document_id", "version"],
                 "additionalProperties": False,
             }
         else:

@@ -18,6 +18,8 @@ from document_mgmt_service.infrastructure.model_ocr import ModelOCRAdapter
 from document_mgmt_service.infrastructure.ocr import NullOCRAdapter
 from document_mgmt_service.infrastructure.postgres import PostgreSQLRepositoryAdapter, create_psycopg_connection_factory
 from document_mgmt_service.infrastructure.qdrant import QdrantSemanticChunkStoreAdapter
+from document_mgmt_service.infrastructure.sqlite_repo import SQLiteDocumentRepository
+from document_mgmt_service.infrastructure.sqlite_vector import SQLiteVectorStore
 from document_mgmt_service.infrastructure.storage import LocalFileStorageAdapter
 from document_mgmt_service.logging import configure_logging, install_exception_hooks
 
@@ -45,12 +47,31 @@ def _build_repository(config: AppConfig):
             create_psycopg_connection_factory(config.postgres_dsn)
         )
         repository.ensure_schema()
+        print(f"Using PostgreSQL: {config.postgres_dsn}")
         return repository
-    return InMemoryDocumentRepository()
+    # SQLite: persistent, zero-config, survives restarts
+    db_path = config.sqlite_db_path or "./data/chitragupta.db"
+    repository = SQLiteDocumentRepository(db_path=db_path)
+    print(f"Using SQLite: {db_path}")
+    return repository
 
 
 def _build_semantic_search(config: AppConfig) -> SemanticSearchService:
-    store = QdrantSemanticChunkStoreAdapter(collection_name=config.qdrant_collection_name)
+    if config.qdrant_url:
+        store = QdrantSemanticChunkStoreAdapter(
+            base_url=config.qdrant_url,
+            collection_name=config.qdrant_collection_name,
+            encryption_key=config.encryption_master_key,
+        )
+        store.set_dimension(config.semantic_embedding_dimension)
+        enc_status = "encrypted" if config.encryption_master_key else "plaintext"
+        print(f"Using Qdrant: {config.qdrant_url} (payloads {enc_status})")
+    else:
+        # SQLite: persistent vector store, zero-config
+        db_path = config.sqlite_db_path or "./data/chitragupta.db"
+        store = SQLiteVectorStore(db_path=db_path)
+        store.set_dimension(config.semantic_embedding_dimension)
+        print(f"Using SQLite vector store: {db_path}")
     return SemanticSearchService(
         store=store,
         embedder=TextEmbeddingService(dimension=config.semantic_embedding_dimension),
@@ -195,7 +216,9 @@ def main() -> None:
         repository.close()
         storage.close()
         ocr.close()
-        # In-memory semantic store does not require shutdown, but the adapter remains swappable.
+        # Close vector store if it has a close method (SQLite, not in-memory)
+        if hasattr(semantic_search, '_store') and hasattr(semantic_search._store, 'close'):
+            semantic_search._store.close()
 
 
 if __name__ == "__main__":

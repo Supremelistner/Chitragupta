@@ -3,13 +3,14 @@
 ## Overview
 
 The Document Management Service is an independent microservice responsible for
-the complete document lifecycle: upload, storage, OCR/extraction, classification,
-metadata, chunking, indexing, semantic retrieval, evidence retrieval, and
-controlled content access.
+the complete document lifecycle: upload, storage, vision/OCR extraction,
+classification, validation, metadata, chunking, indexing, semantic retrieval,
+evidence retrieval, and controlled content access.
 
 Other services must not directly access the underlying document database, vector
-database, OCR provider, or file storage. This service exposes capabilities
-through an MCP server for agent consumption.
+database, OCR/vision provider, or file storage. The future agent consumes only
+document-level MCP tools; Qdrant, PostgreSQL, OCR/vision, and storage remain
+replaceable infrastructure adapters owned by this service.
 
 ---
 
@@ -119,12 +120,40 @@ and auditable.
 ## Ingestion Pipeline
 
 ```
-Upload → Store binary → OCR/extract → Classify privacy → Generate metadata
-    → Chunk text → Embed chunks → Upsert to Qdrant → Update PostgreSQL state
+Upload → Store binary → Vision/OCR extraction → Template/reference discovery
+    → Validate document structure/content → Generate safe metadata
+    → Classify privacy → Chunk text → Embed chunks → Upsert to Qdrant
+    → Update PostgreSQL state
 ```
 
 Each stage updates the `processing_status` field in PostgreSQL, providing
 full observability into ingestion progress.
+
+### Template & Reference Knowledge
+
+The document manager owns validation orchestration. A vision/model adapter can
+classify the uploaded document and extract text/fields. A template discovery
+adapter can use curated templates and web-search-backed references to identify
+which document templates the upload may match. Validation results are stored as
+metadata/provenance; the upload response itself remains a terse success/failure
+status.
+
+### MCP Tool Boundary
+
+The MCP server exposes document-level operations only:
+
+- `upload_document`
+- `get_document_metadata`
+- `get_document_description`
+- `list_documents`
+- `search_documents`
+- `search_document_content`
+- `get_evidence`
+- `get_page`
+- `get_document`
+- `request_sensitive_access`
+
+It does not expose raw Qdrant, PostgreSQL, OCR, or storage operations.
 
 ---
 
@@ -136,23 +165,3 @@ full observability into ingestion progress.
 4. **Stable IDs everywhere** — UUIDs for documents, deterministic strings for chunks.
 5. **No backend accessed directly** — all access goes through typed port interfaces.
 6. **Security is architectural** — the agent cannot bypass the service boundary.
-
----
-
-## Development Conventions
-
-### Explain Before Fix
-
-When a bug, gap, or unexpected behavior is found:
-
-1. **Present the full analysis first** — root cause, affected files, severity, and impact.
-2. **Wait for explicit confirmation** before writing any code changes.
-3. **Fix only what was discussed** — no scope creep without approval.
-
-This applies to all contributors (human and AI).  The goal is shared understanding
-before action, especially for privacy-sensitive or security-relevant behavior.
-
-### Test Before Trust
-
-Every behavioral change must be accompanied by a test that would have caught it.
-A fix without a test is a hypothesis, not a solution.

@@ -9,12 +9,14 @@ from document_mgmt_service.domain.models import DocumentFileKind, DocumentPrivac
 _EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 _PHONE_RE = re.compile(r"\b(?:\+?\d[\d\s().-]{7,}\d)\b")
 _LONG_NUMBER_RE = re.compile(r"\b\d{8,}\b")
+_DATE_RE = re.compile(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b")
+_AADHAAR_SPACED_RE = re.compile(r"\b\d{4}\s+\d{4}\s+\d{4}\b")
 _SECRET_RE = re.compile(
     r"\b(?:password|passcode|secret|token|api[_ -]?key|private key|confidential)\b",
     re.IGNORECASE,
 )
 _SENSITIVE_RE = re.compile(
-    r"\b(?:ssn|social security|aadhaar|aadhar|passport|credit card|bank account|salary|medical|diagnosis|prescription)\b",
+    r"(?:\b(?:ssn|social security|aadhaar|aadhar|adhar|adhhar|uidai|passport|credit card|bank account|salary|medical|diagnosis|prescription)\b|आधार)",
     re.IGNORECASE,
 )
 _PUBLIC_RE = re.compile(
@@ -30,9 +32,13 @@ _PRIVATE_RE = re.compile(
 def infer_file_kind(filename: str, content_type: str | None) -> DocumentFileKind:
     filename_lower = filename.lower()
     content_type_lower = (content_type or "").lower()
-    if "pdf" in content_type_lower or filename_lower.endswith(".pdf"):
+    if content_type_lower.startswith("image/"):
+        return DocumentFileKind.IMAGE
+    if "pdf" in content_type_lower:
         return DocumentFileKind.PDF
-    if content_type_lower.startswith("image/") or filename_lower.endswith(
+    if filename_lower.endswith(".pdf"):
+        return DocumentFileKind.PDF
+    if filename_lower.endswith(
         (".png", ".jpg", ".jpeg", ".gif", ".webp", ".tif", ".tiff", ".bmp")
     ):
         return DocumentFileKind.IMAGE
@@ -42,6 +48,8 @@ def infer_file_kind(filename: str, content_type: str | None) -> DocumentFileKind
 def redact_sensitive_text(text: str, *, max_length: int = 240) -> str:
     cleaned = " ".join(text.split())
     cleaned = _EMAIL_RE.sub("[redacted-email]", cleaned)
+    cleaned = _AADHAAR_SPACED_RE.sub("[redacted-number]", cleaned)
+    cleaned = _DATE_RE.sub("[redacted-date]", cleaned)
     cleaned = _PHONE_RE.sub("[redacted-phone]", cleaned)
     cleaned = _LONG_NUMBER_RE.sub("[redacted-number]", cleaned)
     if len(cleaned) > max_length:
@@ -60,7 +68,7 @@ def generate_safe_description(
     if description_hint:
         return redact_sensitive_text(description_hint)
 
-    parts = [f"{file_kind.value.lower()} document", f"named {filename!r}"]
+    parts = [f"{file_kind.value.lower()} document"]
     if metadata.get("page_count") is not None:
         parts.append(f"with {metadata['page_count']} page(s)")
     if extracted_text:
@@ -94,4 +102,3 @@ def classify_privacy(
     if _PUBLIC_RE.search(haystack):
         return DocumentPrivacyClassification.OPEN
     return DocumentPrivacyClassification.OPEN_NOT_PUBLIC
-

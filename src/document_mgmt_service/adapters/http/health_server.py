@@ -175,12 +175,10 @@ class _DocumentRequestHandler(BaseHTTPRequestHandler):
                         )
                         result = self.ingestion_service.ingest(page_request)
                         documents.append({
+                            "status": "successful",
                             "document_id": result.document_id,
                             "version": result.version,
                             "processing_status": result.processing_status.value,
-                            "privacy": result.privacy.value,
-                            "description": result.description,
-                            "metadata": result.metadata,
                             "page_number": page.page_number,
                             "total_pages": split_result.total_pages,
                             "status_url": f"/documents/{result.document_id}/versions/{result.version}/status",
@@ -189,10 +187,10 @@ class _DocumentRequestHandler(BaseHTTPRequestHandler):
                     self._send_json(
                         HTTPStatus.CREATED,
                         {
-                            "status": "uploaded",
+                            "status": "successful",
                             "documents": documents,
                             "total_pages": split_result.total_pages,
-                            "message": f"PDF split into {len(documents)} pages, each ingested separately.",
+                            "message": f"Uploaded successfully. {len(documents)} page documents created.",
                         },
                     )
                     return
@@ -202,14 +200,11 @@ class _DocumentRequestHandler(BaseHTTPRequestHandler):
             self._send_json(
                 HTTPStatus.CREATED,
                 {
+                    "status": "successful",
+                    "message": "Document uploaded successfully.",
                     "document_id": result.document_id,
                     "version": result.version,
                     "processing_status": result.processing_status.value,
-                    "privacy": result.privacy.value,
-                    "description": result.description,
-                    "metadata": result.metadata,
-                    "storage_key": result.storage_key,
-                    "sha256": result.sha256,
                     "semantic_index_status": result.semantic_index_status.value,
                     "chunk_count": result.chunk_count,
                     "status_url": f"/documents/{result.document_id}/versions/{result.version}/status",

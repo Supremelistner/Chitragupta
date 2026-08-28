@@ -230,14 +230,14 @@ class TestToolRegistry(unittest.TestCase):
         self.assertIsNone(self.registry.get_tool_schema("nonexistent_tool"))
 
     def test_file_retrieval_requires_confirmation(self):
-        for tool in ["get_document", "get_page", "get_document_image", "download_file"]:
+        for tool in ["get_document", "get_page", "download_file"]:
             ct = self.registry.requires_confirmation(tool, {})
             self.assertEqual(
                 ct, ConfirmationType.FILE_RETRIEVAL, f"{tool} should require FILE_RETRIEVAL"
             )
 
     def test_sensitive_access_requires_confirmation(self):
-        for tool in ["get_evidence", "get_document_ocr", "request_sensitive_access"]:
+        for tool in ["get_evidence", "request_sensitive_access"]:
             ct = self.registry.requires_confirmation(tool, {})
             self.assertEqual(
                 ct, ConfirmationType.SENSITIVE_ACCESS, f"{tool} should require SENSITIVE_ACCESS"
@@ -437,15 +437,15 @@ class TestOrchestrationEngine(unittest.TestCase):
         """Sensitive tools pause and ask for confirmation."""
         session = self.engine.create_session()
 
-        # LLM wants to get OCR data (sensitive)
+        # LLM wants to get protected evidence (sensitive)
         tool_call_response = LLMResponse(
             content="",
             tool_calls=[{
                 "id": "tc_sensitive",
                 "type": "function",
                 "function": {
-                    "name": "get_document_ocr",
-                    "arguments": '{"document_id": "abc123", "version": 1}',
+                    "name": "get_evidence",
+                    "arguments": '{"document_id": "abc123", "version": 1, "query": "protected detail"}',
                 },
             }],
         )
@@ -496,12 +496,12 @@ class TestOrchestrationEngine(unittest.TestCase):
                 "id": "tc_confirm",
                 "type": "function",
                 "function": {
-                    "name": "get_document_ocr",
-                    "arguments": '{"document_id": "abc123", "version": 1}',
+                    "name": "get_evidence",
+                    "arguments": '{"document_id": "abc123", "version": 1, "query": "protected detail"}',
                 },
             }],
         )
-        summary_response = LLMResponse(content="Here is the OCR text from your document.")
+        summary_response = LLMResponse(content="Here is the evidence from your document.")
 
         self.mock_llm.chat.return_value = tool_call_response
         response1 = self.engine.process_message(session.session_id, "Show OCR text")
@@ -514,7 +514,7 @@ class TestOrchestrationEngine(unittest.TestCase):
             response1.confirmation_required.request_id,
             approved=True,
         )
-        self.assertIn("OCR", response2.message)
+        self.assertIn("evidence", response2.message)
 
     def test_confirmation_denied_skips_tool(self):
         """After user denies, the tool is skipped."""

@@ -112,19 +112,6 @@ _TOOL_DEFINITIONS: dict[str, tuple[ServiceTarget, str, dict[str, Any], Confirmat
         },
         ConfirmationType.SENSITIVE_ACCESS,  # Evidence may contain PII
     ),
-    "get_document_ocr": (
-        ServiceTarget.DOCUMENT,
-        "Get OCR-extracted text from a document (e.g., Aadhaar number, marks, text). You MUST first call search_documents to find the document_id and version, then call this tool with those IDs. System will ask user to confirm before retrieving.",
-        {
-            "type": "object",
-            "properties": {
-                "document_id": {"type": "string", "description": "Get this from search_documents or list_documents results"},
-                "version": {"type": "integer", "description": "Get this from search_documents or list_documents results"},
-            },
-            "required": ["document_id", "version"],
-        },
-        ConfirmationType.SENSITIVE_ACCESS,
-    ),
     # ── Document: file retrieval (requires confirmation) ──────────────
     "get_document": (
         ServiceTarget.DOCUMENT,
@@ -150,19 +137,6 @@ _TOOL_DEFINITIONS: dict[str, tuple[ServiceTarget, str, dict[str, Any], Confirmat
                 "page_number": {"type": "integer"},
             },
             "required": ["document_id", "version", "page_number"],
-        },
-        ConfirmationType.FILE_RETRIEVAL,
-    ),
-    "get_document_image": (
-        ServiceTarget.DOCUMENT,
-        "Retrieve the raw image/file bytes. You MUST first call search_documents or list_documents to find the document_id. Requires user confirmation.",
-        {
-            "type": "object",
-            "properties": {
-                "document_id": {"type": "string", "description": "Get this from search_documents or list_documents results"},
-                "version": {"type": "integer", "description": "Get this from search_documents or list_documents results"},
-            },
-            "required": ["document_id", "version"],
         },
         ConfirmationType.FILE_RETRIEVAL,
     ),
@@ -421,7 +395,8 @@ _TOOL_DEFINITIONS: dict[str, tuple[ServiceTarget, str, dict[str, Any], Confirmat
 }
 
 # Tools that are exposed to the LLM (subset of all tools)
-# File retrieval tools are NOT exposed — the orchestrator decides when to offer them
+# File retrieval tools are not exposed to the LLM; the orchestrator decides
+# when to offer them after document search and confirmation.
 LLM_VISIBLE_TOOLS = {
     "upload_document",
     "list_documents",
@@ -430,7 +405,6 @@ LLM_VISIBLE_TOOLS = {
     "get_document_metadata",
     "get_document_description",
     "get_evidence",
-    "get_document_ocr",
     "classify_document",
     "verify_ocr",
     "extract_metadata",

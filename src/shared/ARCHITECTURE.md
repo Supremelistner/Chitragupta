@@ -90,15 +90,16 @@ Document (document_id: str)
 - **Provenance**: Alert record stored in PostgreSQL
 
 ### Document → Web Search Service
-- **Purpose**: Download forms, templates, reference documents
+- **Purpose**: Discover document templates, reference requirements, download forms/reference documents
 - **Contract**: `DownloadRequest` → `DownloadResult`
 - **Transport**: HTTP (localhost:8082) or MCP
-- **Provenance**: Downloaded files fed into document ingestion
+- **Provenance**: Search/download references feed validation metadata and can be traced to ingestion outputs
 
-### Agent/Orchestrator → All Services
-- **Purpose**: Orchestrate document processing workflows
-- **Contract**: MCP tools on each service
+### Agent/Orchestrator → Services
+- **Purpose**: Answer user document tasks, compare uploaded documents with outside requirements, and coordinate confirmation-gated retrieval
+- **Contract**: Document-level MCP tools and high-level service tools
 - **Transport**: MCP (stdio or HTTP)
+- **Boundary**: Agents never call Qdrant, PostgreSQL, OCR/vision, or storage directly
 
 ## Schema Ownership Rules
 

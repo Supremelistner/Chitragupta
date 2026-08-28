@@ -19,7 +19,7 @@ sys.path.insert(0, ".")
 from orchestrator_service.config import OrchestratorConfig
 from orchestrator_service.application.orchestrator import OrchestrationEngine
 from orchestrator_service.infrastructure.session_store import FileSessionStore
-from orchestrator_service.infrastructure.confirmation_store import InMemoryConfirmationStore
+from orchestrator_service.infrastructure.file_confirmation_store import FileConfirmationStore
 from orchestrator_service.infrastructure.tool_registry import DefaultToolRegistry
 from orchestrator_service.infrastructure.service_clients import HttpServiceClient, ServiceClientRouter
 from orchestrator_service.infrastructure.llm_provider import QwenLLMProvider
@@ -41,8 +41,10 @@ def main() -> None:
     # Session store
     sessions = FileSessionStore(base_dir=config.session_store_dir)
 
-    # Confirmation store
-    confirmations = InMemoryConfirmationStore()
+    # Confirmation store (persistent — survives restarts)
+    confirmations = FileConfirmationStore(
+        base_dir=config.session_store_dir.replace("sessions", "confirmations")
+    )
 
     # Tool registry
     registry = DefaultToolRegistry()

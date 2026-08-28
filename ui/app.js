@@ -349,11 +349,10 @@ function sendMessage() {
                 const failed = uploadResults.filter(r => r.error);
                 if (succeeded.length > 0) {
                     appendToolInfo(succeeded.length, 'file upload');
-                    // Show simplified doc names
-                    const names = succeeded.map(r => r.name || r.filename).join(', ');
-                    const descs = succeeded.map(r => r.description).filter(Boolean).join('\n');
-                    let msg = '\ud83d\udcc4 Uploaded: ' + names;
-                    if (descs) msg += '\n' + descs;
+                    const names = succeeded.map(r => r.filename).join(', ');
+                    const plural = succeeded.length > 1 ? 's' : '';
+                    let msg = 'Upload successful: ' + succeeded.length + ' file' + plural;
+                    if (names) msg += '\n' + names;
                     appendMessage('assistant', msg);
                 }
                 if (failed.length > 0) {

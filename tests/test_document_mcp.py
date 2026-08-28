@@ -67,6 +67,8 @@ class DocumentMCPInterfaceTests(unittest.TestCase):
             semantic_chunk_size=120,
             semantic_chunk_overlap=20,
             file_storage_root=Path(self.tempdir.name),
+            sqlite_db_path=None,
+            encryption_master_key="",
             ocr_enabled=True,
             huggingface_token=None,
             huggingface_model_id="test-model",
@@ -129,15 +131,12 @@ class DocumentMCPInterfaceTests(unittest.TestCase):
                 "get_page",
                 "get_document",
                 "request_sensitive_access",
-                "get_document_ocr",
-                "get_document_image",
             ],
         )
         joined = " ".join(tools)
         self.assertNotIn("qdrant", joined.lower())
         self.assertNotIn("postgres", joined.lower())
-        # get_document_ocr is an application-level tool (not raw DB access)
-        self.assertNotIn("raw_ocr", joined.lower())
+        self.assertNotIn("ocr", joined.lower())
         self.assertNotIn("storage", joined.lower())
 
     def test_ingestion_retrieval_and_provenance(self) -> None:
@@ -150,10 +149,14 @@ class DocumentMCPInterfaceTests(unittest.TestCase):
                 "content_base64": base64.b64encode(b"%PDF-1.4 sample").decode("ascii"),
                 "content_type": "application/pdf",
                 "document_id": "doc-1",
+                "privacy": "OPEN",
                 "metadata": {"category": "example"},
             },
         )
         uploaded_payload = self._tool_text(uploaded)
+        self.assertEqual(uploaded_payload["status"], "successful")
+        self.assertNotIn("description", uploaded_payload)
+        self.assertNotIn("metadata", uploaded_payload)
         self.assertEqual(uploaded_payload["document_id"], "doc-1")
         self.assertEqual(uploaded_payload["semantic_index_status"], "INDEXED")
         self.assertGreaterEqual(uploaded_payload["chunk_count"], 1)
@@ -163,7 +166,7 @@ class DocumentMCPInterfaceTests(unittest.TestCase):
         self.assertEqual(metadata["metadata"]["category"], "example")
 
         description = self._tool_text(self._rpc(server, "get_document_description", {"document_id": "doc-1", "version": 1}))
-        self.assertIn("sample", description["description"])
+        self.assertIn("pdf document", description["description"])
 
         documents = self._tool_text(self._rpc(server, "list_documents"))
         self.assertEqual(len(documents["results"]), 1)
@@ -250,6 +253,7 @@ class DocumentMCPInterfaceTests(unittest.TestCase):
                     "content_base64": base64.b64encode(b"%PDF-orig").decode("ascii"),
                     "content_type": "application/pdf",
                     "document_id": "doc-original",
+                    "privacy": "OPEN",
                 },
             )
         )

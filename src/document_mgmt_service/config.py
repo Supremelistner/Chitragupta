@@ -46,6 +46,8 @@ class AppConfig:
     semantic_chunk_size: int
     semantic_chunk_overlap: int
     file_storage_root: Path
+    sqlite_db_path: str | None
+    encryption_master_key: str
     ocr_enabled: bool
     huggingface_token: str | None
     huggingface_model_id: str
@@ -84,6 +86,8 @@ class AppConfig:
             semantic_chunk_size=_env_int("DOCUMENT_SERVICE_SEMANTIC_CHUNK_SIZE", 900),
             semantic_chunk_overlap=_env_int("DOCUMENT_SERVICE_SEMANTIC_CHUNK_OVERLAP", 120),
             file_storage_root=file_storage_root,
+            sqlite_db_path=_env("DOCUMENT_SERVICE_SQLITE_DB_PATH"),
+            encryption_master_key=_env("ENCRYPTION_MASTER_KEY", ""),
             ocr_enabled=_env_bool("DOCUMENT_SERVICE_OCR_ENABLED", False),
             huggingface_token=_env("HF_TOKEN"),
             huggingface_model_id=_env("MODEL_SERVICE_HF_MODEL", "Qwen/Qwen2.5-VL-72B-Instruct") or "Qwen/Qwen2.5-VL-72B-Instruct",

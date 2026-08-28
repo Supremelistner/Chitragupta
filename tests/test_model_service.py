@@ -236,11 +236,11 @@ class TestModelMCPServerTools(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Document service OCR/image endpoint tests
+# Document service MCP policy-surface tests
 # ---------------------------------------------------------------------------
 
-class TestDocumentOCRAndImageEndpoints(unittest.TestCase):
-    """Test the new OCR and image endpoints on the document service MCP server."""
+class TestDocumentMCPPolicySurface(unittest.TestCase):
+    """Test that document MCP exposes policy-managed document operations."""
 
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
@@ -293,11 +293,12 @@ class TestDocumentOCRAndImageEndpoints(unittest.TestCase):
             access_service=self.access,
         )
 
-    def _ingest(self, doc_id: str, filename: str = "test.pdf", content: bytes = b"test"):
+    def _ingest(self, doc_id: str, filename: str = "test.pdf", content: bytes = b"test", privacy=None):
         from document_mgmt_service.domain.models import DocumentIngestionRequest
         return self.ingestion.ingest(DocumentIngestionRequest(
             original_filename=filename, content=content,
             content_type="application/pdf", document_id=doc_id,
+            privacy_hint=privacy,
         ))
 
     def _rpc(self, server, name: str, args: dict | None = None) -> dict:
@@ -308,71 +309,64 @@ class TestDocumentOCRAndImageEndpoints(unittest.TestCase):
         })
         return json.loads(response["result"]["content"][0]["text"])
 
-    def test_mcp_tools_include_ocr_and_image(self) -> None:
+    def test_mcp_tools_hide_raw_ocr_and_image(self) -> None:
         server = self._build_mcp()
         response = server._dispatch({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
         tool_names = [t["name"] for t in response["result"]["tools"]]
-        self.assertIn("get_document_ocr", tool_names)
-        self.assertIn("get_document_image", tool_names)
+        self.assertIn("search_document_content", tool_names)
+        self.assertIn("get_evidence", tool_names)
+        self.assertIn("get_document", tool_names)
+        self.assertNotIn("get_document_ocr", tool_names)
+        self.assertNotIn("get_document_image", tool_names)
 
-    def test_get_document_ocr_returns_extracted_text(self) -> None:
+    def test_content_search_returns_policy_managed_text(self) -> None:
         self._ingest("doc-ocr-1")
         server = self._build_mcp()
-        result = self._rpc(server, "get_document_ocr", {
-            "document_id": "doc-ocr-1", "version": 1,
+        result = self._rpc(server, "search_document_content", {
+            "query": "extracted text", "document_id": "doc-ocr-1", "version": 1,
         })
-        self.assertEqual(result["document_id"], "doc-ocr-1")
-        self.assertEqual(result["version"], 1)
-        self.assertIn("extracted OCR text", result["extracted_text"])
-        self.assertEqual(result["processing_status"], "INDEXED")
+        self.assertEqual(result["results"][0]["document_id"], "doc-ocr-1")
+        self.assertIn("provenance", result["results"][0])
 
-    def test_get_document_ocr_includes_metadata(self) -> None:
+    def test_document_metadata_includes_status_and_privacy(self) -> None:
         self._ingest("doc-ocr-2")
         server = self._build_mcp()
-        result = self._rpc(server, "get_document_ocr", {
+        result = self._rpc(server, "get_document_metadata", {
             "document_id": "doc-ocr-2", "version": 1,
         })
         self.assertIn("metadata", result)
         self.assertIn("description", result)
         self.assertIn("privacy", result)
-        self.assertIn("file_kind", result)
+        self.assertEqual(result["processing_status"], "INDEXED")
 
-    def test_get_document_image_requires_approval(self) -> None:
-        """get_document_image on non-sensitive docs requires user approval."""
+    def test_get_document_requires_approval(self) -> None:
+        """Whole-document retrieval on non-public docs requires approval."""
         self._ingest("doc-img-1", content=b"fake-pdf-content")
         server = self._build_mcp()
-        result = self._rpc(server, "get_document_image", {
+        result = self._rpc(server, "get_document", {
             "document_id": "doc-img-1", "version": 1,
         })
-        # Without approval_granted, the gate blocks retrieval
         self.assertIn("access_action", result)
         self.assertEqual(result["access_action"], "REQUIRE_APPROVAL")
         self.assertIn("access_reason", result)
 
-    def test_get_document_image_with_approval(self) -> None:
-        """After approval, get_document_image returns content."""
+    def test_get_document_returns_content_for_open_documents(self) -> None:
+        """Open whole-document retrieval uses original file storage."""
+        from document_mgmt_service.domain.models import DocumentPrivacyClassification
         content = b"fake-pdf-content-for-image"
-        self._ingest("doc-img-2", content=content)
+        self._ingest("doc-img-2", content=content, privacy=DocumentPrivacyClassification.OPEN)
         server = self._build_mcp()
-        result = self._rpc(server, "get_document_image", {
-            "document_id": "doc-img-2", "version": 1, "requestor": "test-user",
-        })
-        # Should require approval first
-        self.assertEqual(result["access_action"], "REQUIRE_APPROVAL")
-        # Now grant approval via a second request (simulating user confirmation)
-        result2 = self._rpc(server, "request_sensitive_access", {
+        result = self._rpc(server, "get_document", {
             "document_id": "doc-img-2", "version": 1,
-            "intent": "WHOLE_DOCUMENT", "query": "view document",
         })
-        # The sensitive access request should also require approval
-        self.assertIn("access_action", result2)
+        self.assertEqual(base64.b64decode(result["content_base64"]), content)
 
     def test_nonexistent_document_returns_error(self) -> None:
         server = self._build_mcp()
         response = server._dispatch({
             "jsonrpc": "2.0", "id": 1,
             "method": "tools/call",
-            "params": {"name": "get_document_ocr", "arguments": {
+            "params": {"name": "get_document_metadata", "arguments": {
                 "document_id": "nonexistent", "version": 1,
             }},
         })

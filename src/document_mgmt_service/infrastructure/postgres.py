@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any
@@ -124,7 +125,7 @@ class PostgreSQLRepositoryAdapter(PostgreSQLDocumentRepository):
                         record.sha256,
                         record.privacy.value,
                         record.processing_status.value,
-                        record.metadata,
+                        json.dumps(record.metadata, default=str),
                         record.description,
                         record.extracted_text,
                         record.extracted_text_excerpt,
@@ -135,14 +136,14 @@ class PostgreSQLRepositoryAdapter(PostgreSQLDocumentRepository):
                         record.updated_at,
                         record.completed_at,
                         record.error_message,
-                        record.model_extraction,
+                        json.dumps(record.model_extraction, default=str) if record.model_extraction else None,
                         record.description_safe,
                         record.description_detailed,
                         record.extraction_confidence,
                         record.document_type,
                         record.document_sub_type,
                         record.language_primary,
-                        record.pii_types,
+                        json.dumps(record.pii_types) if record.pii_types else None,
                     ),
                 )
             conn.commit()

@@ -16,6 +16,13 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "Pillow>=10.0.0",
     "prometheus_client>=0.19.0",
+    "psycopg[binary]>=3.1.0",
+    # Document encryption (Fernet symmetric encryption for stored docs)
+    "cryptography>=42.0.0",
+    # Model providers (lazy-imported; included so first-request failures
+    # are caught at install time rather than at runtime)
+    "huggingface_hub>=0.24.0",
+    "groq>=0.11.0",
 ]
 
 [project.scripts]

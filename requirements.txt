@@ -1,0 +1,3 @@
+# Chitragupta — runtime dependencies
+# Mirrors pyproject.toml [project.dependencies]. Kept in sync manually.
+# Used by scripts/install-wsl.sh for WSL setup.

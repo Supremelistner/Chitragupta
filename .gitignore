@@ -1,4 +1,5 @@
 .venv/
+.venv-wsl/
 __pycache__/
 *.pyc
 .venv/
@@ -8,3 +9,6 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .env
+# Runtime data and test fixtures
+data/
+src/data/

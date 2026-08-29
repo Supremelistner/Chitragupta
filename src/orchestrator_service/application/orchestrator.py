@@ -36,12 +36,15 @@ from orchestrator_service.domain.ports import (
     ToolRegistry,
 )
 from orchestrator_service.infrastructure.service_clients import ServiceClientRouter
+from orchestrator_service.persona import build_system_prompt, humanize as _humanize_reply
 import requests as _req_lib
 
 logger = logging.getLogger("orchestrator.engine")
 
-# System prompt for the orchestrator
-ORCHESTRATOR_SYSTEM_PROMPT = """You are Chitragupta, a document assistant. You are not a general chatbot. Your job is to reason about the user's uploaded documents, the documents they may need, and the relationship between those documents and the user's query.
+# System prompt for the orchestrator. The actual value is set per-request
+# via build_system_prompt() in :mod:`orchestrator_service.persona` so the
+# LLM can address the user by name. Kept here for backward compatibility.
+ORCHESTRATOR_SYSTEM_PROMPT = """You are Chitragupta, a personal document agent.
 
 CORE BEHAVIOR
 
@@ -103,6 +106,10 @@ class OrchestrationEngine:
         self._registry = tool_registry
         self._router = service_router
         self._confirmation_threshold = confirmation_threshold
+        # Per-user persona (set via set_user_name). When set, the system
+        # message is generated from the user name; otherwise the default
+        # ORCHESTRATOR_SYSTEM_PROMPT is used.
+        self._user_name: str | None = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -252,6 +259,22 @@ class OrchestrationEngine:
             # Format search results for context
             results_list = result.get("results", [])
             if not results_list:
+                # No semantic-text match. The document may still be in the
+                # collection under a different filename or with empty OCR.
+                # Tell the LLM to try list_documents so it doesn't conclude
+                # "you haven't uploaded this" from a single empty search.
+                injection = (
+                    "[auto-search] The user's query mentions a document but "
+                    "semantic search returned no matches. "
+                    "Call list_documents() to see everything in the collection — "
+                    "the document may be present under a different filename or "
+                    "have no extracted text yet. If list_documents shows nothing, "
+                    "ask the user to upload it. DO NOT tell the user the document "
+                    "is missing until list_documents has been called and was empty."
+                )
+                session.messages.append(
+                    ConversationMessage(role=MessageRole.SYSTEM, content=injection)
+                )
                 return
             docs_summary = []
             for r in results_list:
@@ -289,7 +312,7 @@ class OrchestrationEngine:
 
         # Call LLM with conversation context + tools
         llm_response = self._llm.chat(
-            messages=session.messages,
+            messages=self._build_messages(session),
             tools=tools if tools else None,
         )
 
@@ -315,6 +338,15 @@ class OrchestrationEngine:
                 "token_usage": llm_response.token_usage,
             },
         )
+
+    def _build_messages(self, session) -> list:
+        """Build the message list for the LLM, prepending the system prompt."""
+        from orchestrator_service.domain.models import ConversationMessage, MessageRole
+        system = build_system_prompt(user_name=self._user_name)
+        return [
+            ConversationMessage(role=MessageRole.SYSTEM, content=system),
+            *session.messages,
+        ]
 
     def _execute_tool_calls(
         self, session: Session, llm_response: Any
@@ -408,11 +440,11 @@ class OrchestrationEngine:
 
         # Feed results back to LLM for final response
         followup = self._llm.chat(
-            messages=session.messages,
+            messages=self._build_messages(session),
             tools=tools if (tools := self._registry.get_all_tool_schemas()) else None,
         )
 
-        final_content = followup.content or "Done."
+        final_content = _humanize_reply(followup.content or "Done.")
         session.messages.append(
             ConversationMessage(
                 role=MessageRole.ASSISTANT,
@@ -501,11 +533,11 @@ class OrchestrationEngine:
         # Get LLM to summarize the result
         tools = self._registry.get_all_tool_schemas()
         followup = self._llm.chat(
-            messages=session.messages,
+            messages=self._build_messages(session),
             tools=tools if tools else None,
         )
 
-        final_content = followup.content or "Done."
+        final_content = _humanize_reply(followup.content or "Done.")
         session.messages.append(
             ConversationMessage(
                 role=MessageRole.ASSISTANT,

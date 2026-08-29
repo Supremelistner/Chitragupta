@@ -51,7 +51,7 @@ def _build_providers(config: ModelServiceConfig) -> dict[str, HuggingFaceProvide
         # Wrap the primary HF provider with fallback
         primary = providers["huggingface"]
         providers["huggingface"] = FallbackProvider(primary=primary, fallback=groq)
-        print(f"  Fallback: Groq ({config.groq_model_id}) — activates on HF 402/429")
+        print(f"  Fallback: Groq ({config.groq_model_id}) — activates on HF errors / timeouts / 402/429 / 5xx")
 
     # Future providers can be added here:
     # if config.fireworks_api_key:

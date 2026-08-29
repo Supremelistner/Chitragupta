@@ -1,0 +1,88 @@
+version: "3.8"
+
+services:
+  # ── Monitoring Stack ──────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=7d"
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+
+  # ── Application Services ──────────────────────────────────────────
+  document-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.document
+    ports:
+      - "8080:8080"
+    env_file: .env
+    depends_on:
+      - postgres
+      - qdrant
+
+  model-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.model
+    ports:
+      - "8081:8081"
+    env_file: .env
+
+  web-search-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    ports:
+      - "8082:8082"
+    env_file: .env
+
+  validator-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.validator
+    ports:
+      - "8083:8083"
+    env_file: .env
+
+  # ── Infrastructure ────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: chitragupta
+      POSTGRES_USER: chitragupta
+      POSTGRES_PASSWORD: chitragupta_dev
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+volumes:
+  prometheus_data:
+  grafana_data:
+  postgres_data:
+  qdrant_data:

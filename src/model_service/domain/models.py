@@ -30,6 +30,7 @@ class InferenceTaskType(str, Enum):
     CONTENT_SUMMARIZATION = "content_summarization"
     PRIVACY_CLASSIFICATION = "privacy_classification"
     CUSTOM = "custom"
+    TEMPLATE_FROM_WEB = "template_from_web"
 
 
 @dataclass(frozen=True, slots=True)

@@ -13,6 +13,7 @@ import logging
 import math
 import urllib.request
 import urllib.error
+import uuid
 from typing import Any, Sequence
 
 from document_mgmt_service.application.search import SemanticChunkMatch, SemanticChunkStore
@@ -37,11 +38,21 @@ class QdrantSemanticChunkStoreAdapter(SemanticChunkStore):
         base_url: str = "http://localhost:6333",
         collection_name: str = "document_chunks",
         encryption_key: str = "",
+        strict: bool = False,
     ) -> None:
+        """Qdrant-backed vector store.
+
+        ``strict=True`` makes connection failures and create-collection
+        errors raise rather than silently falling back to an in-memory
+        store. This is the recommended mode for production and Docker
+        deployments, where silent fallback would mask a broken
+        dependency.
+        """
         self._base_url = base_url.rstrip("/")
         self._collection_name = collection_name
         self._dimension: int = 256
         self._encryption_key = encryption_key
+        self._strict = strict
         self._use_memory = False
         self._memory_chunks: dict[str, tuple[SemanticChunkRecord, tuple[float, ...], dict[str, Any]]] = {}
         self._ensure_collection()
@@ -50,7 +61,13 @@ class QdrantSemanticChunkStoreAdapter(SemanticChunkStore):
         self._dimension = dimension
 
     def _ensure_collection(self) -> None:
-        """Create the collection if it doesn't exist. Falls back to in-memory if unreachable."""
+        """Create the collection if it doesn't exist.
+
+        Default behavior: silently fall back to an in-memory store when
+        Qdrant is unreachable (kept for local dev / tests).
+        ``strict=True`` raises instead, so containerized deployments
+        fail fast on a misconfigured dependency.
+        """
         try:
             url = f"{self._base_url}/collections/{self._collection_name}"
             req = urllib.request.Request(url, method="GET")
@@ -59,10 +76,16 @@ class QdrantSemanticChunkStoreAdapter(SemanticChunkStore):
                     return  # Already exists
         except urllib.error.HTTPError as e:
             if e.code != 404:
-                logger.warning("Qdrant collection check failed: %s", e)
+                msg = f"Qdrant collection check failed: HTTP {e.code} {e.reason}"
+                if self._strict:
+                    raise RuntimeError(msg) from e
+                logger.warning(msg)
                 return
         except Exception as e:
-            logger.warning("Qdrant unreachable, falling back to in-memory: %s", e)
+            msg = f"Qdrant unreachable at {self._base_url}: {e.__class__.__name__}: {e}"
+            if self._strict:
+                raise RuntimeError(msg) from e
+            logger.warning("%s — falling back to in-memory store", msg)
             self._use_memory = True
             return
 
@@ -85,17 +108,36 @@ class QdrantSemanticChunkStoreAdapter(SemanticChunkStore):
                     self._collection_name, self._dimension,
                 )
         except Exception as e:
-            logger.warning("Failed to create Qdrant collection, falling back to in-memory: %s", e)
+            msg = (
+                f"Failed to create Qdrant collection "
+                f"'{self._collection_name}' at {self._base_url}: "
+                f"{e.__class__.__name__}: {e}"
+            )
+            if self._strict:
+                raise RuntimeError(msg) from e
+            logger.warning("%s — falling back to in-memory store", msg)
             self._use_memory = True
 
     def ping(self) -> None:
         if self._use_memory:
+            if self._strict:
+                raise RuntimeError(
+                    "Qdrant is in in-memory fallback mode; strict=True requires a live Qdrant"
+                )
             return
         url = f"{self._base_url}/healthz"
         req = urllib.request.Request(url)
-        with urllib.request.urlopen(req, timeout=3) as resp:
-            if resp.status != 200:
-                raise RuntimeError(f"Qdrant health check failed: {resp.status}")
+        try:
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                if resp.status != 200:
+                    raise RuntimeError(
+                        f"Qdrant health check failed: HTTP {resp.status}"
+                    )
+        except Exception as exc:
+            raise RuntimeError(
+                f"Qdrant ping failed at {self._base_url}: "
+                f"{exc.__class__.__name__}: {exc}"
+            ) from exc
 
     def upsert(self, *, chunks: Sequence[SemanticChunkRecord], vectors: Sequence[Sequence[float]]) -> None:
         if len(chunks) != len(vectors):
@@ -113,7 +155,7 @@ class QdrantSemanticChunkStoreAdapter(SemanticChunkStore):
             raw_payload = self._build_payload(chunk)
             encrypted = self._encrypt_if_configured(raw_payload, chunk)
             points.append({
-                "id": chunk.chunk_id,
+                "id": _to_qdrant_point_id(chunk.chunk_id),
                 "vector": list(vector),
                 "payload": encrypted,
             })
@@ -331,3 +373,16 @@ def _parse_iso(value: str | None):
         return datetime.fromisoformat(value)
     except (ValueError, TypeError):
         return None
+
+# Qdrant point IDs must be either unsigned integers or UUIDs.
+# Our domain uses deterministic string chunk_ids (e.g. "doc:v1:0"),
+# so we map them to UUID5 in a fixed namespace. The mapping is
+# stable across processes and restarts, which is what we need for
+# idempotent upserts.
+_QDRANT_POINT_NAMESPACE = uuid.UUID("5b2c4e0a-7a99-4f1a-9f3b-1d0c0a3f7c11")
+
+
+def _to_qdrant_point_id(chunk_id: str) -> str:
+    """Map a deterministic string chunk_id to a stable UUID5."""
+    return str(uuid.uuid5(_QDRANT_POINT_NAMESPACE, str(chunk_id)))
+

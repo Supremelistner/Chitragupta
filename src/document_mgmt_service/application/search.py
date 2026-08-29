@@ -107,6 +107,17 @@ class SemanticChunker:
                             "semantic_index_status": record.semantic_index_status.value,
                             "page_number": page_number,
                             "chunk_index": chunk_index,
+                            # V2: owner + relation are indexed so the LLM can
+                            # answer questions like "show me my mother's docs".
+                            "owner_type": getattr(record, "owner_type", None),
+                            "relation": getattr(record, "relation", None),
+                            "relation_name": getattr(record, "relation_name", None),
+                            # V2: field_pointers is the set of fields the model
+                            # extracted. The actual values never enter Qdrant.
+                            "field_pointers": (
+                                list((record.extracted_fields or {}).keys())
+                                if record.extracted_fields else None
+                            ),
                         },
                         description=record.description,
                         original_filename=record.original_filename,
@@ -135,6 +146,13 @@ class SemanticChunker:
                         "semantic_index_status": record.semantic_index_status.value,
                         "page_number": 1,
                         "chunk_index": 0,
+                        "owner_type": getattr(record, "owner_type", None),
+                        "relation": getattr(record, "relation", None),
+                        "relation_name": getattr(record, "relation_name", None),
+                        "field_pointers": (
+                            list((record.extracted_fields or {}).keys())
+                            if record.extracted_fields else None
+                        ),
                         "source": "document_summary",
                     },
                     description=record.description,

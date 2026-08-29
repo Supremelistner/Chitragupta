@@ -71,6 +71,15 @@ class DocumentVersionRecord:
     document_sub_type: str | None = None
     language_primary: str | None = None
     pii_types: list[str] | None = None
+    # V2: owner / relation extracted by the vision model
+    owner_type: str | None = None         # SELF | MOTHER | FATHER | SPOUSE | CHILD | OTHER
+    relation: str | None = None           # e.g. "Mother"
+    relation_name: str | None = None      # e.g. "Priya Sharma"
+    # V2: split summary (safe) from fields (PII, encrypted)
+    summary: str | None = None
+    extracted_fields: dict[str, Any] | None = None
+    # V2: extracted expiry date if visible on the document
+    expiry_date: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,10 +131,16 @@ class DocumentSummaryRecord:
     privacy: DocumentPrivacyClassification
     metadata: dict[str, Any]
     description: str | None
-    semantic_index_status: SemanticIndexStatus
-    chunk_count: int
-    created_at: datetime | None
-    updated_at: datetime | None
+    summary: str | None = None
+    owner_type: str | None = None
+    relation: str | None = None
+    relation_name: str | None = None
+    expiry_date: datetime | None = None
+    extracted_fields: dict[str, Any] | None = None
+    semantic_index_status: SemanticIndexStatus = SemanticIndexStatus.PENDING
+    chunk_count: int = 0
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)

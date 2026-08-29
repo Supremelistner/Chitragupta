@@ -40,9 +40,27 @@ class MCPServer:
             message = self._read_message(reader)
             if message is None:
                 return
-            response = self._dispatch(message)
+            response = self.handle_message(message)
             if response is not None:
                 self._write_message(writer, response)
+
+    def handle_message(self, message: dict[str, Any]) -> dict[str, Any] | None:
+        """Process a single JSON-RPC message and return the response.
+
+        This is the transport-agnostic entry point used by both the stdio
+        loop and the HTTP transport. It returns ``None`` for JSON-RPC
+        notifications (messages without an ``id``), per the JSON-RPC 2.0
+        spec: "A Notification is a Request object without an ``id`` member."
+        """
+        if not isinstance(message, dict):
+            return None
+        if "id" not in message:
+            # JSON-RPC notification: process the side effect but send no
+            # response. We still call _dispatch so that ``notifications/
+            # ...`` handlers can be added later; the result is discarded.
+            self._dispatch(message)
+            return None
+        return self._dispatch(message)
 
     def _dispatch(self, message: dict[str, Any]) -> dict[str, Any] | None:
         method = message.get("method")
@@ -105,6 +123,10 @@ class MCPServer:
                             self._tool_spec(
                                 "request_sensitive_access",
                                 "Request approval for sensitive access without bypassing policy.",
+                            ),
+                            self._tool_spec(
+                                "get_field_value",
+                                "Look up a single extracted field on a document version. Two-step: first call returns requires_confirmation, second call (with confirm=true) returns the value with a source name (no URL).",
                             ),
                         ]
                     },
@@ -252,7 +274,41 @@ class MCPServer:
                 ),
             )
 
+        if name == "get_field_value":
+            from dataclasses import asdict
+            from document_mgmt_service.application.fields import (
+                FieldAccessError,
+                get_field_value,
+            )
+            document_id = str(arguments.get("document_id") or "")
+            field = str(arguments.get("field") or "")
+            confirm = bool(arguments.get("confirm", False))
+            try:
+                version = int(arguments.get("version", 0))
+            except (TypeError, ValueError):
+                version = 0
+            if not document_id or not field or version <= 0:
+                return self._tool_result(
+                    request_id,
+                    {"status": "error", "message": "document_id, version, and field are required"},
+                )
+            try:
+                result = get_field_value(
+                    self._ingestion_service._dependencies.repository,
+                    document_id=document_id,
+                    version=version,
+                    field_name=field,
+                    confirm=confirm,
+                )
+            except FieldAccessError as exc:
+                return self._tool_result(
+                    request_id,
+                    {"status": "error", "message": str(exc)},
+                )
+            return self._tool_result(request_id, asdict(result))
+
         return self._error(request_id, -32602, f"Unknown tool: {name}")
+
 
     def _ingest_document(self, arguments: dict[str, Any]) -> dict[str, Any]:
         filename = arguments.get("filename")
@@ -403,6 +459,18 @@ class MCPServer:
                     "requestor": {"type": "string"},
                 },
                 "required": ["document_id", "version", "intent"],
+                "additionalProperties": False,
+            }
+        elif name == "get_field_value":
+            schema = {
+                "type": "object",
+                "properties": {
+                    "document_id": {"type": "string"},
+                    "version": {"type": "integer"},
+                    "field": {"type": "string"},
+                    "confirm": {"type": "boolean", "default": False},
+                },
+                "required": ["document_id", "version", "field"],
                 "additionalProperties": False,
             }
         else:

@@ -171,6 +171,7 @@ class HuggingFaceProviderAdapter(ModelProvider):
             InferenceTaskType.CONTENT_SUMMARIZATION: _SUMMARIZATION_PROMPT,
             InferenceTaskType.PRIVACY_CLASSIFICATION: _PRIVACY_CLASSIFICATION_PROMPT,
             InferenceTaskType.CUSTOM: _CUSTOM_PROMPT,
+            InferenceTaskType.TEMPLATE_FROM_WEB: _TEMPLATE_FROM_WEB_PROMPT,
         }
         return prompts.get(task, "")
 
@@ -329,6 +330,18 @@ JSON SCHEMA:
     "original_key_text": "<important text in original language, e.g. Hindi>",
     "original_key_text_language": "<iso code of original script>"
   },
+  "ownership": {
+    "owner_type": "SELF | MOTHER | FATHER | SPOUSE | CHILD | OTHER | UNKNOWN",
+    "relation": "<role to a typical primary user, e.g. Mother / Father / Husband / Son. null if SELF/UNKNOWN>",
+    "relation_name": "<person's name as it appears on the document, if OTHER. null otherwise>",
+    "reasoning": "<one short sentence explaining how you inferred the owner>"
+  },
+  "expiry": {
+    "has_expiry": true/false,
+    "expiry_date": "<ISO 8601 date (YYYY-MM-DD) if visible, else null>",
+    "expiry_status": "VALID | EXPIRED | EXPIRING_SOON | NO_EXPIRY | UNKNOWN",
+    "days_until_expiry": <integer or null>
+  },
   "fields": {
     "<field_name>": {
       "value": "<extracted value in English>",
@@ -352,6 +365,21 @@ RULES:
 - If two fields could share a value (e.g. total_marks vs max_possible_marks), put the other in alternate_fields.
 - extraction_confidence is the average of all field confidences.
 - DO NOT fabricate values. If a field is not visible, set value to null and confidence to 0.0.
+
+OWNERSHIP RULES:
+- owner_type is your best guess of whose document this is, from the perspective of a single primary user.
+- If the document shows a name, infer whether it matches the primary user (SELF), an immediate family member (MOTHER / FATHER / SPOUSE / CHILD), or someone else (OTHER).
+- If the document has no name visible, set owner_type to SELF (the default) and reasoning to "no name on document".
+- relation is the role for family members (e.g. "Mother"). null for SELF or UNKNOWN.
+- relation_name is the person's name as it appears on the document, if OTHER. null otherwise.
+
+EXPIRY RULES:
+- has_expiry: true if the document has any kind of validity date (issue date + validity, or expiry date).
+- For documents that have no expiry by nature (Aadhaar, PAN), set has_expiry=false, expiry_status=NO_EXPIRY.
+- expiry_date must be ISO 8601 (YYYY-MM-DD) when present, else null.
+- expiry_status: EXPIRED if past, EXPIRING_SOON if within 30 days, VALID otherwise.
+- days_until_expiry: positive integer for future, negative for past, null if NO_EXPIRY/UNKNOWN.
+- If unsure, use UNKNOWN rather than guessing.
 """
 
 _SUMMARIZATION_PROMPT = """You are a document summarizer for an Indian document processing system.
@@ -405,6 +433,49 @@ PRIVACY RULES:
 - If unsure between classifications, choose the MORE restrictive one.
 - recommended_access_level: "require_approval" for SENSITIVE and PRIVATE.
 """
+
+_TEMPLATE_FROM_WEB_PROMPT = """You are a document template extractor.
+
+TASK: Convert the provided web search results about a document type into a structured
+JSON template that captures the document's required fields, optional fields, and
+expiry/temporal rules.
+
+OUTPUT RULES:
+- Respond with ONLY a valid JSON object. No markdown, no explanation, no text outside JSON.
+- Use field names in lower_snake_case (e.g. aadhaar_number, date_of_birth, license_number).
+- Mark every field as either required (must be present) or optional.
+- If the search results mention an expiry, set temporal.has_expiry=true and the
+  rules (years_valid, renewable, etc.).
+- If the document has no expiry by nature (e.g. Aadhaar, PAN), set temporal.has_expiry=false.
+- Each field gets a best-guess field_type: person_name | date | number | organization | address | government_id | phone | email | grade | other.
+
+JSON SCHEMA:
+{
+  "document_type": "<high-level category>",
+  "document_sub_type": "<specific type>",
+  "required_fields": [
+    {"name": "<field_name>", "field_type": "<type>", "description": "<one short sentence>", "example": "<value or null>"}
+  ],
+  "optional_fields": [
+    {"name": "<field_name>", "field_type": "<type>", "description": "<one short sentence>", "example": "<value or null>"}
+  ],
+  "temporal": {
+    "has_expiry": true/false,
+    "default_validity_years": <integer or null>,
+    "renewable": true/false,
+    "notes": "<one short sentence about expiry / validity>"
+  },
+  "known_authorities": ["<issuing body>"],
+  "source_titles": ["<titles of the web pages used>"]
+}
+
+RULES:
+- Use only information grounded in the provided web search content.
+- If a field is plausibly present but you are not sure, put it in optional_fields.
+- Keep the field list small and useful — do not invent obscure fields.
+- Do not include any commentary outside the JSON object.
+"""
+
 
 _CUSTOM_PROMPT = """You are a document analysis assistant for an Indian document processing system.
 

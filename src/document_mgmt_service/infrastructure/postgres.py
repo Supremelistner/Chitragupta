@@ -17,11 +17,27 @@ from document_mgmt_service.domain.ports import PostgreSQLDocumentRepository
 from document_mgmt_service.schemas import apply_migrations
 
 
-def create_psycopg_connection_factory(dsn: str) -> Callable[[], Any]:
+def create_psycopg_connection_factory(
+    dsn: str,
+    *,
+    connect_timeout: int = 5,
+    application_name: str = "document-mgmt-service",
+) -> Callable[[], Any]:
+    """Return a factory that opens a fresh psycopg connection per call.
+
+    ``connect_timeout`` guards against a hanging TCP connect so the
+    service can fail fast when the database container is not ready.
+    ``application_name`` shows up in ``pg_stat_activity`` for easier
+    debugging from inside the container.
+    """
     def factory() -> Any:
         import psycopg  # type: ignore[import-not-found]
 
-        return psycopg.connect(dsn)
+        return psycopg.connect(
+            dsn,
+            connect_timeout=connect_timeout,
+            application_name=application_name,
+        )
 
     return factory
 
@@ -31,9 +47,15 @@ class PostgreSQLRepositoryAdapter(PostgreSQLDocumentRepository):
         self._connection_factory = connection_factory
 
     def ping(self) -> None:
-        with self._connection_factory() as conn:
-            with conn.cursor() as cursor:
-                cursor.execute("SELECT 1")
+        try:
+            with self._connection_factory() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("SELECT 1")
+                    cursor.fetchone()
+        except Exception as exc:
+            raise RuntimeError(
+                f"PostgreSQL ping failed: {exc.__class__.__name__}: {exc}"
+            ) from exc
 
     def ensure_schema(self) -> None:
         """Apply versioned migrations from the schema catalog."""
@@ -160,7 +182,8 @@ class PostgreSQLRepositoryAdapter(PostgreSQLDocumentRepository):
                            created_at, updated_at, completed_at, error_message,
                            model_extraction, description_safe, description_detailed,
                            extraction_confidence, document_type, document_sub_type,
-                           language_primary, pii_types
+                           language_primary, pii_types,
+                           summary, extracted_fields, owner_type, relation, relation_name, expiry_date
                     FROM document_versions
                     WHERE document_id = %s AND version = %s
                     """,
@@ -183,7 +206,8 @@ class PostgreSQLRepositoryAdapter(PostgreSQLDocumentRepository):
                            created_at, updated_at, completed_at, error_message,
                            model_extraction, description_safe, description_detailed,
                            extraction_confidence, document_type, document_sub_type,
-                           language_primary, pii_types
+                           language_primary, pii_types,
+                           summary, extracted_fields, owner_type, relation, relation_name, expiry_date
                     FROM document_versions
                     WHERE document_id = %s
                     ORDER BY version ASC
@@ -199,7 +223,8 @@ class PostgreSQLRepositoryAdapter(PostgreSQLDocumentRepository):
                 cursor.execute(
                     """
                     SELECT d.document_id, d.latest_version, v.processing_status, v.privacy,
-                           v.metadata, v.description, v.semantic_index_status, v.chunk_count,
+                           v.metadata, v.description, v.summary, v.owner_type, v.relation, v.relation_name, v.expiry_date,
+                           v.extracted_fields, v.semantic_index_status, v.chunk_count,
                            d.created_at, d.updated_at
                     FROM documents d
                     JOIN document_versions v
@@ -245,9 +270,22 @@ class PostgreSQLRepositoryAdapter(PostgreSQLDocumentRepository):
             document_sub_type=row[26],
             language_primary=row[27],
             pii_types=list(row[28]) if row[28] else None,
+            summary=row[29],
+            extracted_fields=dict(row[30]) if row[30] else None,
+            owner_type=row[31],
+            relation=row[32],
+            relation_name=row[33],
+            expiry_date=row[34],
         )
 
     def _row_to_summary(self, row: Any) -> DocumentSummaryRecord:
+        # Columns from list_documents SELECT, in order:
+        #  0 d.document_id    1 latest_version        2 processing_status
+        #  3 privacy          4 metadata              5 description
+        #  6 summary          7 owner_type            8 relation
+        #  9 relation_name    10 expiry_date          11 extracted_fields
+        #  12 semantic_index_status   13 chunk_count  14 created_at
+        #  15 updated_at
         return DocumentSummaryRecord(
             document_id=row[0],
             latest_version=int(row[1]),
@@ -255,8 +293,14 @@ class PostgreSQLRepositoryAdapter(PostgreSQLDocumentRepository):
             privacy=DocumentPrivacyClassification(row[3]),
             metadata=dict(row[4] or {}),
             description=row[5],
-            semantic_index_status=SemanticIndexStatus(row[6]),
-            chunk_count=int(row[7] or 0),
-            created_at=row[8],
-            updated_at=row[9],
+            summary=row[6],
+            owner_type=row[7],
+            relation=row[8],
+            relation_name=row[9],
+            expiry_date=row[10],
+            extracted_fields=dict(row[11]) if row[11] else None,
+            semantic_index_status=SemanticIndexStatus(row[12]),
+            chunk_count=int(row[13] or 0),
+            created_at=row[14],
+            updated_at=row[15],
         )

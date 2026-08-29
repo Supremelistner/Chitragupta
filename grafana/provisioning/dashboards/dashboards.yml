@@ -1,0 +1,10 @@
+apiVersion: 1
+providers:
+  - name: Chitragupta
+    orgId: 1
+    folder: Chitragupta
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /var/lib/grafana/dashboards

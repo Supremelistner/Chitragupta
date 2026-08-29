@@ -35,6 +35,7 @@ class ModelProviderProtocol:
     """Protocol for model service text extraction and classification (optional dependency)."""
     def extract_text(self, image_bytes: bytes, mime_type: str) -> str: ...
     def classify_document(self, image_bytes: bytes, mime_type: str) -> dict[str, Any]: ...
+    def extract_metadata(self, image_bytes: bytes, mime_type: str) -> dict[str, Any]: ...
 
 
 class DocumentValidatorProtocol:
@@ -61,6 +62,93 @@ class IngestionDependencies:
 
 class IngestionError(RuntimeError):
     pass
+
+
+def _coerce_ownership(classification: dict[str, Any] | None) -> tuple[str | None, str | None, str | None]:
+    """Pull owner_type/relation/relation_name from a model classification dict.
+
+    Returns (owner_type, relation, relation_name) — any of which may be None
+    if the model did not surface them.
+    """
+    if not classification or classification.get("error"):
+        return None, None, None
+    ownership = classification.get("ownership") or {}
+    if not isinstance(ownership, dict):
+        return None, None, None
+    owner_type = (ownership.get("owner_type") or "").strip().upper() or None
+    relation = (ownership.get("relation") or "").strip() or None
+    relation_name = (ownership.get("relation_name") or "").strip() or None
+    if owner_type in {None, "SELF", "UNKNOWN"}:
+        relation = None
+        relation_name = None
+    return owner_type, relation, relation_name
+
+
+class _StubModelProvider:
+    """Returned when individual model calls fail so the rest of the pipeline can continue."""
+    def extract_text(self, image_bytes: bytes, mime_type: str) -> str: return ""
+    def classify_document(self, image_bytes: bytes, mime_type: str) -> dict[str, Any]: return {}
+    def extract_metadata(self, image_bytes: bytes, mime_type: str) -> dict[str, Any]: return {}
+
+
+def _merge_classification(
+    classification: dict[str, Any],
+    metadata_extraction: dict[str, Any],
+) -> dict[str, Any]:
+    """Merge DOCUMENT_CLASSIFICATION + METADATA_EXTRACTION results."""
+    merged: dict[str, Any] = dict(classification)
+    if not metadata_extraction or metadata_extraction.get("error"):
+        return merged
+    for k in ("document_type", "document_sub_type", "description", "language"):
+        v = metadata_extraction.get(k)
+        if v and k not in merged:
+            merged[k] = v
+    for k in ("fields", "ownership", "expiry", "extraction_confidence"):
+        v = metadata_extraction.get(k)
+        if v is not None:
+            merged[k] = v
+    return merged
+
+
+def _coerce_expiry(classification: dict[str, Any] | None) -> datetime | None:
+    """Pull expiry_date from the model classification, if present and parseable."""
+    if not classification or classification.get("error"):
+        return None
+    expiry = classification.get("expiry") or {}
+    if not isinstance(expiry, dict) or not expiry.get("has_expiry"):
+        return None
+    raw = expiry.get("expiry_date")
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+
+
+def _split_fields(
+    classification: dict[str, Any] | None,
+) -> tuple[dict[str, Any], list[str]]:
+    """Split a model's METADATA_EXTRACTION result into:
+
+    * ``summary``  — a redacted, safe-to-show description (used for chat & Qdrant)
+    * ``extracted_fields``  — the full values, PII included (encrypted at rest in Postgres)
+    * ``field_names``  — the keys, used to build Qdrant ``field_pointers``
+    """
+    if not classification or classification.get("error"):
+        return {}, []
+    fields = classification.get("fields") or {}
+    if not isinstance(fields, dict):
+        return {}, []
+    extracted: dict[str, Any] = {}
+    for name, info in fields.items():
+        if not isinstance(info, dict):
+            continue
+        value = info.get("value")
+        if value is None or value == "":
+            continue
+        extracted[name] = value
+    return extracted, list(extracted.keys())
 
 
 def _parse_privacy(classification: str | None) -> DocumentPrivacyClassification:
@@ -164,21 +252,10 @@ class IngestionService:
                             image_bytes=model_bytes,
                             mime_type=model_mime,
                         )
-                        # Classification — identify what the document is
-                        try:
-                            classification = model_provider.classify_document(
-                                image_bytes=model_bytes,
-                                mime_type=model_mime,
-                            )
-                            logger.info(
-                                "Document %s classified as %s/%s (confidence=%.2f)",
-                                document_id,
-                                classification.get("document_type", "unknown"),
-                                classification.get("document_sub_type", "unknown"),
-                                classification.get("confidence", 0.0),
-                            )
-                        except Exception as cls_exc:
-                            logger.warning("Classification failed: %s", cls_exc)
+                        # Classification + structured metadata
+                        classification = self._run_model_pipeline(
+                            model_provider, model_bytes, model_mime, document_id,
+                        )
                     except Exception:
                         if ocr is not None:
                             extracted_text = ocr.extract_text(temp_path)
@@ -240,6 +317,16 @@ class IngestionService:
             desc_from_model = classification.get("description", {})
             privacy_from_model = classification.get("privacy", {})
 
+            # V2: extract ownership + expiry + structured fields from the
+            # merged classification dict.
+            owner_type, relation, relation_name = _coerce_ownership(classification)
+            expiry_date = _coerce_expiry(classification)
+            extracted_fields, field_names = _split_fields(classification)
+            # The "safe" description from the model is what we want in
+            # Qdrant + the public-facing summary. If the model didn't supply
+            # one, fall back to the regex-based generator.
+            summary = desc_from_model.get("safe") if isinstance(desc_from_model, dict) else None
+
             description = (
                 desc_from_model.get("safe")
                 or desc_from_model.get("detailed")
@@ -274,6 +361,12 @@ class IngestionService:
                 semantic_index_status=SemanticIndexStatus.INDEXING,
                 completed_at=now,
                 updated_at=now,
+                summary=summary,
+                extracted_fields=extracted_fields or None,
+                owner_type=owner_type,
+                relation=relation,
+                relation_name=relation_name,
+                expiry_date=expiry_date,
             )
             repository.upsert_version(completed_record)
 
@@ -375,6 +468,12 @@ class IngestionService:
             document_sub_type=extraction.get("document_sub_type"),
             language_primary=lang_block.get("primary"),
             pii_types=privacy_block.get("pii_types"),
+            summary=extraction.get("description", {}).get("safe") if isinstance(extraction.get("description"), dict) else None,
+            extracted_fields=extraction.get("extracted_fields"),
+            owner_type=extraction.get("owner_type"),
+            relation=extraction.get("relation"),
+            relation_name=extraction.get("relation_name"),
+            expiry_date=extraction.get("expiry_date"),
         )
         self._dependencies.repository.upsert_version(updated)
         return updated
@@ -406,6 +505,12 @@ class IngestionService:
         document_sub_type: str | None = None,
         language_primary: str | None = None,
         pii_types: list[str] | None = None,
+        summary: str | None = None,
+        extracted_fields: dict[str, Any] | None = None,
+        owner_type: str | None = None,
+        relation: str | None = None,
+        relation_name: str | None = None,
+        expiry_date: datetime | None = None,
     ) -> DocumentVersionRecord:
         return DocumentVersionRecord(
             document_id=record.document_id,
@@ -445,7 +550,55 @@ class IngestionService:
             document_sub_type=document_sub_type if document_sub_type is not None else record.document_sub_type,
             language_primary=language_primary if language_primary is not None else record.language_primary,
             pii_types=pii_types if pii_types is not None else record.pii_types,
+            summary=summary if summary is not None else record.summary,
+            extracted_fields=extracted_fields if extracted_fields is not None else record.extracted_fields,
+            owner_type=owner_type if owner_type is not None else record.owner_type,
+            relation=relation if relation is not None else record.relation,
+            relation_name=relation_name if relation_name is not None else record.relation_name,
+            expiry_date=expiry_date if expiry_date is not None else record.expiry_date,
         )
+
+    def _run_model_pipeline(
+        self,
+        model_provider: ModelProviderProtocol,
+        image_bytes: bytes,
+        mime_type: str,
+        document_id: str,
+    ) -> dict[str, Any]:
+        """Run classification + structured metadata extraction and merge them.
+
+        Returns an empty dict if everything fails. Never raises — the ingestion
+        pipeline must keep going even if the model service is misbehaving.
+        """
+        classification: dict[str, Any] = {}
+        try:
+            classification = model_provider.classify_document(
+                image_bytes=image_bytes, mime_type=mime_type,
+            )
+        except Exception as exc:
+            logger.warning("Classification failed for %s: %s", document_id, exc)
+            classification = {}
+
+        metadata_extraction: dict[str, Any] = {}
+        try:
+            metadata_extraction = model_provider.extract_metadata(
+                image_bytes=image_bytes, mime_type=mime_type,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Metadata extraction failed for %s: %s", document_id, exc,
+            )
+            metadata_extraction = {}
+
+        merged = _merge_classification(classification, metadata_extraction)
+        if "document_type" in merged and "document_sub_type" in merged:
+            logger.info(
+                "Document %s structured: %s/%s",
+                document_id,
+                merged.get("document_type"),
+                merged.get("document_sub_type"),
+            )
+        return merged
 
     def _build_metadata(
         self,

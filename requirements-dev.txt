@@ -1,0 +1,23 @@
+# Development dependencies — installed via `make dev-install`.
+# Keep this list small and let pyproject.toml drive runtime dependencies.
+
+-r requirements.txt
+
+# Testing
+pytest>=8.3.0
+pytest-asyncio>=0.24.0
+pytest-cov>=5.0.0
+pytest-mock>=3.14.0
+
+# Lint / format / type-check
+ruff>=0.6.9
+mypy>=1.13.0
+types-requests>=2.32.0
+
+# Security
+bandit>=1.7.10
+safety>=3.2.0
+
+# Dev workflow
+pre-commit>=4.0.0
+watchfiles>=0.24.0

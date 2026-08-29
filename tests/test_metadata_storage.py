@@ -536,6 +536,7 @@ class TestStorageConfigAbstraction(unittest.TestCase):
             app_name="test", environment="test", log_level="INFO",
             http_host="127.0.0.1", http_port=8080,
             mcp_server_name="test", mcp_server_version="0.1.0",
+            mcp_transport="stdio", mcp_http_host="127.0.0.1", mcp_http_port=8085,
             postgres_dsn=None, qdrant_url=None,
             qdrant_collection_name="test", semantic_embedding_dimension=32,
             semantic_chunk_size=100, semantic_chunk_overlap=20,

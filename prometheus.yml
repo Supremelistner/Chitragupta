@@ -1,0 +1,35 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # ── Application Services ──────────────────────────────────────────
+  - job_name: "document-service"
+    static_configs:
+      - targets: ["localhost:8080"]
+    metrics_path: "/metrics"
+
+  - job_name: "model-service"
+    static_configs:
+      - targets: ["localhost:8081"]
+    metrics_path: "/metrics"
+
+  - job_name: "web-search-service"
+    static_configs:
+      - targets: ["localhost:8082"]
+    metrics_path: "/metrics"
+
+  - job_name: "validator-service"
+    static_configs:
+      - targets: ["localhost:8083"]
+    metrics_path: "/metrics"
+
+  # ── Infrastructure ────────────────────────────────────────────────
+  - job_name: "postgres"
+    static_configs:
+      - targets: ["localhost:9187"]
+
+  - job_name: "qdrant"
+    static_configs:
+      - targets: ["localhost:6333"]
+    metrics_path: "/metrics"

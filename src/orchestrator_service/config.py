@@ -47,6 +47,10 @@ class OrchestratorConfig:
     # Confirmation
     confirmation_threshold: int
 
+    # Local profile (single-user mode)
+    profile_path: str
+    require_profile: bool
+
     # HF token
     hf_token: str | None
 
@@ -73,6 +77,8 @@ class OrchestratorConfig:
             web_search_service_url=_env("WEB_SEARCH_SERVICE_URL", "http://localhost:8082") or "http://localhost:8082",
             session_store_dir=_env("ORCHESTRATOR_SESSION_DIR", "./data/sessions") or "./data/sessions",
             confirmation_threshold=_env_int("ORCHESTRATOR_CONFIRM_THRESHOLD", 3),
+            profile_path=_env("CHITRAGUPTA_PROFILE_PATH", "") or "",
+            require_profile=(_env("CHITRAGUPTA_REQUIRE_PROFILE", "0") or "0").strip().lower() in {"1", "true", "yes", "on"},
             hf_token=_env("HF_TOKEN"),
             groq_api_key=_env("GROQ_API_KEY"),
             groq_model_id=_env("GROQ_LLM_MODEL", "qwen/qwen3.8-27b") or "qwen/qwen3.8-27b",

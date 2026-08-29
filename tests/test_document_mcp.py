@@ -60,6 +60,9 @@ class DocumentMCPInterfaceTests(unittest.TestCase):
             http_port=8080,
             mcp_server_name="document-management-service",
             mcp_server_version="0.1.0",
+            mcp_transport="stdio",
+            mcp_http_host="127.0.0.1",
+            mcp_http_port=8085,
             postgres_dsn=None,
             qdrant_url=None,
             qdrant_collection_name="document_chunks",
@@ -131,6 +134,7 @@ class DocumentMCPInterfaceTests(unittest.TestCase):
                 "get_page",
                 "get_document",
                 "request_sensitive_access",
+                "get_field_value",
             ],
         )
         joined = " ".join(tools)

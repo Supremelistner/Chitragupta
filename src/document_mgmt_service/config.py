@@ -39,6 +39,9 @@ class AppConfig:
     http_port: int
     mcp_server_name: str
     mcp_server_version: str
+    mcp_transport: str
+    mcp_http_host: str
+    mcp_http_port: int
     postgres_dsn: str | None
     qdrant_url: str | None
     qdrant_collection_name: str
@@ -78,6 +81,9 @@ class AppConfig:
             )
             or "document-management-service",
             mcp_server_version=_env("DOCUMENT_SERVICE_VERSION", "0.1.0") or "0.1.0",
+            mcp_transport=(_env("DOCUMENT_SERVICE_MCP_TRANSPORT", "stdio") or "stdio").strip().lower(),
+            mcp_http_host=_env("DOCUMENT_SERVICE_MCP_HTTP_HOST", "0.0.0.0") or "0.0.0.0",
+            mcp_http_port=_env_int("DOCUMENT_SERVICE_MCP_HTTP_PORT", 8085),
             postgres_dsn=_env("DOCUMENT_SERVICE_POSTGRES_DSN"),
             qdrant_url=_env("DOCUMENT_SERVICE_QDRANT_URL"),
             qdrant_collection_name=_env("DOCUMENT_SERVICE_QDRANT_COLLECTION", "document_chunks")
@@ -93,3 +99,8 @@ class AppConfig:
             huggingface_model_id=_env("MODEL_SERVICE_HF_MODEL", "Qwen/Qwen2.5-VL-72B-Instruct") or "Qwen/Qwen2.5-VL-72B-Instruct",
             request_timeout_seconds=_env_int("MODEL_SERVICE_TIMEOUT_SECONDS", 30),
         )
+
+    def is_mcp_http(self) -> bool:
+        """True when the MCP server should accept HTTP JSON-RPC connections."""
+        return self.mcp_transport == "http"
+

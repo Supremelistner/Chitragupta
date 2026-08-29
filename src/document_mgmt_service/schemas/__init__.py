@@ -150,6 +150,42 @@ CREATE INDEX IF NOT EXISTS idx_doc_rel_type
 # ---------------------------------------------------------------------------
 # Migration 004 — Model extraction columns
 # ---------------------------------------------------------------------------
+MIGRATION_005 = Migration(
+    version=5,
+    description="Add owner/relation/summary/expiry and split extracted fields for redaction",
+    sql="""
+-- Adds columns that let the orchestrator know whose document this is
+-- (self / mother / etc.) and how to render it in chat.
+-- Also splits the document body into:
+--   * summary  — short, redacted, safe to show
+--   * extracted_fields — structured values (license_number, dob, ...),
+--                          encrypted at rest by the application
+--   * expiry_date — used by the validator to flag expired docs
+-- The existing ``extracted_text`` column remains for backward compatibility.
+
+ALTER TABLE document_versions
+    ADD COLUMN IF NOT EXISTS summary             TEXT,
+    ADD COLUMN IF NOT EXISTS extracted_fields    JSONB,
+    ADD COLUMN IF NOT EXISTS owner_type          TEXT,
+    ADD COLUMN IF NOT EXISTS relation            TEXT,
+    ADD COLUMN IF NOT EXISTS relation_name       TEXT,
+    ADD COLUMN IF NOT EXISTS expiry_date         TIMESTAMPTZ;
+
+CREATE INDEX IF NOT EXISTS idx_doc_versions_owner_type
+    ON document_versions (owner_type);
+
+CREATE INDEX IF NOT EXISTS idx_doc_versions_relation
+    ON document_versions (relation);
+
+CREATE INDEX IF NOT EXISTS idx_doc_versions_expiry
+    ON document_versions (expiry_date);
+
+-- GIN index for the structured fields JSONB
+CREATE INDEX IF NOT EXISTS idx_doc_versions_extracted_fields
+    ON document_versions USING GIN (extracted_fields);
+""",
+)
+
 MIGRATION_004 = Migration(
     version=4,
     description="Model extraction columns for structured document metadata",
@@ -195,7 +231,7 @@ CREATE INDEX IF NOT EXISTS idx_doc_versions_model_extraction
 # Migration registry
 # ---------------------------------------------------------------------------
 MIGRATIONS: list[Migration] = sorted(
-    [MIGRATION_001, MIGRATION_002, MIGRATION_003, MIGRATION_004],
+    [MIGRATION_001, MIGRATION_002, MIGRATION_003, MIGRATION_004, MIGRATION_005],
     key=lambda m: m.version,
 )
 

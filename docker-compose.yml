@@ -1,5 +1,3 @@
-version: "3.8"
-
 # Chitragupta — Infrastructure Services
 # Run: docker compose up -d
 # Stop: docker compose down
@@ -30,7 +28,9 @@ services:
     volumes:
       - qdrant_data:/qdrant/storage
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:6333/healthz || exit 1"]
+      # The qdrant image does not ship curl or wget. Use bash's built-in
+      # /dev/tcp to do a cheap TCP-only check on the listening port.
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/6333 || exit 1'"]
       interval: 5s
       timeout: 3s
       retries: 10

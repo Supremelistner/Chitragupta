@@ -37,6 +37,14 @@ class _DocumentRequestHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.OK, self.health_service.report().to_dict())
             return
 
+        # Generic tool dispatch: GET /tools/{tool_name}?args...
+        # Used by the orchestrator's HttpServiceClient which expects a
+        # /tools/{name} shape.
+        tool_match = re.match(r"^/tools/(?P<tool_name>[^/]+)$", urlparse(self.path).path)
+        if tool_match:
+            self._handle_tool_dispatch(tool_match.group("tool_name"), query_params=True)
+            return
+
         metadata_match = re.match(r"^/documents/(?P<document_id>[^/]+)/versions/(?P<version>\d+)/metadata$", urlparse(self.path).path)
         if metadata_match:
             self._handle_metadata_retrieval(metadata_match.group("document_id"), int(metadata_match.group("version")))
@@ -125,6 +133,13 @@ class _DocumentRequestHandler(BaseHTTPRequestHandler):
 
             if path == "/alerts":
                 self._handle_alert()
+                return
+
+            # Generic tool dispatch: POST /tools/{tool_name}
+            # The orchestrator's HttpServiceClient posts to this path.
+            tool_match = re.match(r"^/tools/(?P<tool_name>[^/]+)$", path)
+            if tool_match:
+                self._handle_tool_dispatch(tool_match.group("tool_name"), query_params=False)
                 return
 
             evidence_match = re.match(r"^/documents/(?P<document_id>[^/]+)/versions/(?P<version>\d+)/evidence$", path)
@@ -336,6 +351,211 @@ class _DocumentRequestHandler(BaseHTTPRequestHandler):
             "document_id": document_id,
             "version": version,
         })
+
+    # ------------------------------------------------------------------
+    # Generic /tools/{name} dispatch
+    # ------------------------------------------------------------------
+    # The orchestrator's HttpServiceClient calls POST /tools/{tool_name} for
+    # every tool, but this HTTP server exposes specific routes like
+    # /search/documents and /documents. This dispatch table maps tool names
+    # to handler methods so the orchestrator's calls succeed without the
+    # orchestrator needing to know each route.
+    _TOOL_DISPATCH_GET = {
+        "list_documents": "_tool_list_documents",
+        "list_templates": "_tool_list_templates",
+        "get_template": "_tool_get_template",
+        "get_alerts": "_tool_get_alerts",
+        "get_document": "_tool_get_document",
+        "get_document_ocr": "_tool_get_document_ocr",
+        "get_page": "_tool_get_page",
+        "get_document_metadata": "_tool_get_document_metadata",
+        "get_document_description": "_tool_get_document_description",
+    }
+    _TOOL_DISPATCH_POST = {
+        "list_documents": "_tool_list_documents",
+        "search_documents": "_tool_search_documents",
+        "search_document_content": "_tool_search_content",
+        "get_evidence": "_tool_get_evidence",
+        "upload_document": "_tool_upload_document",
+    }
+
+    def _handle_tool_dispatch(self, tool_name: str, *, query_params: bool) -> None:
+        """Dispatch a /tools/{name} request to the appropriate handler."""
+        if query_params:
+            table = self._TOOL_DISPATCH_GET
+            try:
+                args = {k: v[0] if len(v) == 1 else v for k, v in parse_qs(urlparse(self.path).query).items()}
+            except Exception:
+                args = {}
+        else:
+            table = self._TOOL_DISPATCH_POST
+            try:
+                args = self._read_json_body()
+            except Exception:
+                args = {}
+
+        method_name = table.get(tool_name)
+        if method_name is None:
+            self._send_json(
+                HTTPStatus.NOT_FOUND,
+                {"error": f"Tool '{tool_name}' is not exposed via /tools/ on this service"},
+            )
+            return
+
+        handler = getattr(self, method_name, None)
+        if handler is None:
+            self._send_json(
+                HTTPStatus.NOT_IMPLEMENTED,
+                {"error": f"Tool '{tool_name}' is registered but its handler is not yet implemented"},
+            )
+            return
+
+        try:
+            handler(args)
+        except IngestionError as exc:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+        except Exception as exc:  # pragma: no cover - defensive
+            logging.getLogger("document_mgmt_service.http").exception(
+                "Tool %s dispatch failed", tool_name,
+            )
+            self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
+
+    # --- /tools/{name} handler methods ---------------------------------
+
+    def _tool_list_documents(self, args: dict) -> None:
+        results = self.access_service.list_documents()
+        self._send_json(HTTPStatus.OK, results)
+
+    def _tool_search_documents(self, args: dict) -> None:
+        query = self._required_query(args)
+        results = self.access_service.search_documents(
+            query,
+            limit=int(args.get("limit", 10)),
+            requestor=self._first_context(args),
+        )
+        self._send_json(HTTPStatus.OK, results)
+
+    def _tool_search_content(self, args: dict) -> None:
+        query = self._required_query(args)
+        results = self.access_service.search_content(
+            query,
+            limit=int(args.get("limit", 10)),
+            document_id=args.get("document_id"),
+            version=int(args["version"]) if args.get("version") is not None else None,
+            requestor=self._first_context(args),
+        )
+        self._send_json(HTTPStatus.OK, results)
+
+    def _tool_get_evidence(self, args: dict) -> None:
+        document_id = self._required_field(args, "document_id")
+        version = int(self._required_field(args, "version"))
+        query = self._required_query(args)
+        results = self.access_service.retrieve_evidence(
+            document_id=document_id, version=version, query=query,
+            limit=int(args.get("limit", 5)),
+            requestor=self._first_context(args),
+        )
+        self._send_json(HTTPStatus.OK, results)
+
+    def _tool_upload_document(self, args: dict) -> None:
+        self._send_json(
+            HTTPStatus.BAD_REQUEST,
+            {"error": "Use POST /documents (multipart) for uploads, not /tools/upload_document"},
+        )
+
+    def _tool_list_templates(self, args: dict) -> None:
+        self._send_json(HTTPStatus.NOT_IMPLEMENTED, {"error": "list_templates not implemented on this service"})
+
+    def _tool_get_template(self, args: dict) -> None:
+        self._send_json(HTTPStatus.NOT_IMPLEMENTED, {"error": "get_template not implemented on this service"})
+
+    def _tool_get_alerts(self, args: dict) -> None:
+        self._send_json(HTTPStatus.OK, {"alerts": []})
+
+    def _tool_get_document(self, args: dict) -> None:
+        document_id = self._required_field(args, "document_id")
+        version = int(self._required_field(args, "version"))
+        try:
+            response = self.access_service.retrieve_document(document_id, version)
+        except (ApprovalRequiredError, AccessDeniedError) as exc:
+            self._send_json(HTTPStatus.FORBIDDEN, {
+                "error": str(exc),
+                "access_action": exc.decision.action.value,
+                "access_reason": exc.decision.reason,
+            })
+            return
+        except KeyError as exc:
+            self._send_json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
+            return
+        self._send_json(HTTPStatus.OK, response.payload)
+
+    def _tool_get_document_ocr(self, args: dict) -> None:
+        document_id = self._required_field(args, "document_id")
+        version = int(self._required_field(args, "version"))
+        try:
+            record = self.access_service._load_record(document_id, version)
+        except KeyError as exc:
+            self._send_json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
+            return
+        self._send_json(HTTPStatus.OK, {"text": record.extracted_text or ""})
+
+    def _tool_get_page(self, args: dict) -> None:
+        document_id = self._required_field(args, "document_id")
+        version = int(self._required_field(args, "version"))
+        try:
+            response = self.access_service.retrieve_page(document_id, version)
+        except (ApprovalRequiredError, AccessDeniedError) as exc:
+            self._send_json(HTTPStatus.FORBIDDEN, {
+                "error": str(exc),
+                "access_action": exc.decision.action.value,
+                "access_reason": exc.decision.reason,
+            })
+            return
+        except KeyError as exc:
+            self._send_json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
+            return
+        self._send_json(HTTPStatus.OK, response.payload)
+
+    def _tool_get_document_metadata(self, args: dict) -> None:
+        document_id = self._required_field(args, "document_id")
+        version = int(self._required_field(args, "version"))
+        try:
+            payload = self.access_service.get_document_metadata(document_id, version)
+        except KeyError as exc:
+            self._send_json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
+            return
+        self._send_json(HTTPStatus.OK, payload)
+
+    def _tool_get_document_description(self, args: dict) -> None:
+        document_id = self._required_field(args, "document_id")
+        version = int(self._required_field(args, "version"))
+        try:
+            payload = self.access_service.get_document_description(document_id, version)
+        except KeyError as exc:
+            self._send_json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
+            return
+        self._send_json(HTTPStatus.OK, payload)
+
+    def _required_query(self, payload: dict) -> str:
+        q = payload.get("query")
+        if not q or not str(q).strip():
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "query is required"})
+            raise ValueError("query required")
+        return str(q)
+
+    def _required_field(self, payload: dict, name: str):
+        v = payload.get(name)
+        if v is None or v == "":
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": f"{name} is required"})
+            raise ValueError(f"{name} required")
+        return v
+
+    def _first_context(self, payload: dict) -> str | None:
+        """Best-effort requestor extraction for access policy."""
+        ctx = payload.get("context") or payload.get("requestor")
+        if isinstance(ctx, dict):
+            return ctx.get("user_id") or ctx.get("user")
+        return ctx
 
     def _handle_metadata_retrieval(self, document_id: str, version: int) -> None:
         """Return full document metadata including model extraction fields."""

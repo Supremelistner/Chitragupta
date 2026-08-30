@@ -246,9 +246,7 @@ class TestDocumentMCPPolicySurface(unittest.TestCase):
         self.tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tempdir.cleanup)
 
-        from document_mgmt_service.infrastructure.memory import InMemoryDocumentRepository
         from document_mgmt_service.infrastructure.storage import LocalFileStorageAdapter
-        from document_mgmt_service.infrastructure.qdrant import QdrantSemanticChunkStoreAdapter
         from document_mgmt_service.application.search import (
             SemanticChunker, SemanticSearchService, TextEmbeddingService,
         )
@@ -256,9 +254,11 @@ class TestDocumentMCPPolicySurface(unittest.TestCase):
         from document_mgmt_service.application.access import DocumentAccessService
         from document_mgmt_service.application.health import HealthService
 
-        self.repo = InMemoryDocumentRepository()
+        from tests._live_stack import build_postgres_repo, build_qdrant_store
+
+        self.repo = build_postgres_repo(self)
         self.storage = LocalFileStorageAdapter(Path(self.tempdir.name))
-        self.store = QdrantSemanticChunkStoreAdapter()
+        self.store = build_qdrant_store(self, dimension=32)
         self.search = SemanticSearchService(
             store=self.store,
             embedder=TextEmbeddingService(dimension=32),

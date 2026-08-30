@@ -39,9 +39,10 @@ from document_mgmt_service.domain.models import (
     DocumentProcessingStatus,
     SemanticIndexStatus,
 )
-from document_mgmt_service.infrastructure.memory import InMemoryDocumentRepository
 from document_mgmt_service.infrastructure.qdrant import QdrantSemanticChunkStoreAdapter
 from document_mgmt_service.infrastructure.storage import LocalFileStorageAdapter
+
+from tests._live_stack import build_postgres_repo, build_qdrant_store
 
 
 # ---------------------------------------------------------------------------
@@ -355,9 +356,9 @@ class TestIngestionWithRealDocuments(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tempdir.cleanup)
-        self.repo = InMemoryDocumentRepository()
+        self.repo = build_postgres_repo(self)
         self.storage = LocalFileStorageAdapter(Path(self.tempdir.name))
-        self.store = QdrantSemanticChunkStoreAdapter()
+        self.store = build_qdrant_store(self, dimension=64)
         self.search = SemanticSearchService(
             store=self.store,
             embedder=TextEmbeddingService(dimension=64),
@@ -540,9 +541,9 @@ class TestAccessPolicyWithRealDocuments(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tempdir.cleanup)
-        self.repo = InMemoryDocumentRepository()
+        self.repo = build_postgres_repo(self)
         self.storage = LocalFileStorageAdapter(Path(self.tempdir.name))
-        self.store = QdrantSemanticChunkStoreAdapter()
+        self.store = build_qdrant_store(self, dimension=64)
         self.search = SemanticSearchService(
             store=self.store,
             embedder=TextEmbeddingService(dimension=64),

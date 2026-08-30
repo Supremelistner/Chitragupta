@@ -26,9 +26,10 @@ from document_mgmt_service.application.search import (
     TextEmbeddingService,
 )
 from document_mgmt_service.config import AppConfig
-from document_mgmt_service.infrastructure.memory import InMemoryDocumentRepository
 from document_mgmt_service.infrastructure.qdrant import QdrantSemanticChunkStoreAdapter
 from document_mgmt_service.infrastructure.storage import LocalFileStorageAdapter
+
+from tests._live_stack import build_postgres_repo, build_qdrant_store
 
 
 class StaticOCR:
@@ -50,9 +51,9 @@ class DocumentHTTPTransportTests(unittest.TestCase):
         self.tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tempdir.cleanup)
 
-        repo = InMemoryDocumentRepository()
+        repo = build_postgres_repo(self)
         storage = LocalFileStorageAdapter(Path(self.tempdir.name))
-        store = QdrantSemanticChunkStoreAdapter()
+        store = build_qdrant_store(self, dimension=64)
         search = SemanticSearchService(
             store=store,
             embedder=TextEmbeddingService(dimension=64),
@@ -76,7 +77,6 @@ class DocumentHTTPTransportTests(unittest.TestCase):
             semantic_chunk_size=120,
             semantic_chunk_overlap=20,
             file_storage_root=Path(self.tempdir.name),
-            sqlite_db_path=None,
             encryption_master_key="",
             ocr_enabled=True,
             huggingface_token=None,

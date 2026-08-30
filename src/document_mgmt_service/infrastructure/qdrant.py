@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import urllib.request
 import urllib.error
 import uuid
@@ -38,36 +37,30 @@ class QdrantSemanticChunkStoreAdapter(SemanticChunkStore):
         base_url: str = "http://localhost:6333",
         collection_name: str = "document_chunks",
         encryption_key: str = "",
-        strict: bool = False,
+        dimension: int = 256,
+        strict: bool = True,
     ) -> None:
         """Qdrant-backed vector store.
 
-        ``strict=True`` makes connection failures and create-collection
-        errors raise rather than silently falling back to an in-memory
-        store. This is the recommended mode for production and Docker
-        deployments, where silent fallback would mask a broken
-        dependency.
+        This adapter always runs in strict mode. Connection failures,
+        collection-creation errors, and upsert errors all raise
+        ``RuntimeError`` — there is no silent in-memory fallback. The
+        document service is expected to run with a live Qdrant container;
+        if the container is missing or misconfigured, the service must
+        fail fast so the operator notices.
         """
         self._base_url = base_url.rstrip("/")
         self._collection_name = collection_name
-        self._dimension: int = 256
+        self._dimension: int = dimension
         self._encryption_key = encryption_key
         self._strict = strict
-        self._use_memory = False
-        self._memory_chunks: dict[str, tuple[SemanticChunkRecord, tuple[float, ...], dict[str, Any]]] = {}
         self._ensure_collection()
 
     def set_dimension(self, dimension: int) -> None:
         self._dimension = dimension
 
     def _ensure_collection(self) -> None:
-        """Create the collection if it doesn't exist.
-
-        Default behavior: silently fall back to an in-memory store when
-        Qdrant is unreachable (kept for local dev / tests).
-        ``strict=True`` raises instead, so containerized deployments
-        fail fast on a misconfigured dependency.
-        """
+        """Create the collection if it doesn't exist. Always strict."""
         try:
             url = f"{self._base_url}/collections/{self._collection_name}"
             req = urllib.request.Request(url, method="GET")
@@ -76,55 +69,40 @@ class QdrantSemanticChunkStoreAdapter(SemanticChunkStore):
                     return  # Already exists
         except urllib.error.HTTPError as e:
             if e.code != 404:
-                msg = f"Qdrant collection check failed: HTTP {e.code} {e.reason}"
-                if self._strict:
-                    raise RuntimeError(msg) from e
-                logger.warning(msg)
-                return
+                raise RuntimeError(
+                    f"Qdrant collection check failed: HTTP {e.code} {e.reason}"
+                ) from e
         except Exception as e:
-            msg = f"Qdrant unreachable at {self._base_url}: {e.__class__.__name__}: {e}"
-            if self._strict:
-                raise RuntimeError(msg) from e
-            logger.warning("%s — falling back to in-memory store", msg)
-            self._use_memory = True
-            return
+            raise RuntimeError(
+                f"Qdrant unreachable at {self._base_url}: {e.__class__.__name__}: {e}"
+            ) from e
 
         # Create collection
+        url = f"{self._base_url}/collections/{self._collection_name}"
+        payload = json.dumps({
+            "vectors": {
+                "size": self._dimension,
+                "distance": "Cosine",
+            },
+        }).encode()
+        req = urllib.request.Request(
+            url, data=payload, method="PUT",
+            headers={"Content-Type": "application/json"},
+        )
         try:
-            url = f"{self._base_url}/collections/{self._collection_name}"
-            payload = json.dumps({
-                "vectors": {
-                    "size": self._dimension,
-                    "distance": "Cosine",
-                },
-            }).encode()
-            req = urllib.request.Request(
-                url, data=payload, method="PUT",
-                headers={"Content-Type": "application/json"},
-            )
             with urllib.request.urlopen(req, timeout=10) as resp:
                 logger.info(
                     "Created Qdrant collection '%s' (dim=%d)",
                     self._collection_name, self._dimension,
                 )
         except Exception as e:
-            msg = (
+            raise RuntimeError(
                 f"Failed to create Qdrant collection "
                 f"'{self._collection_name}' at {self._base_url}: "
                 f"{e.__class__.__name__}: {e}"
-            )
-            if self._strict:
-                raise RuntimeError(msg) from e
-            logger.warning("%s — falling back to in-memory store", msg)
-            self._use_memory = True
+            ) from e
 
     def ping(self) -> None:
-        if self._use_memory:
-            if self._strict:
-                raise RuntimeError(
-                    "Qdrant is in in-memory fallback mode; strict=True requires a live Qdrant"
-                )
-            return
         url = f"{self._base_url}/healthz"
         req = urllib.request.Request(url)
         try:
@@ -142,13 +120,6 @@ class QdrantSemanticChunkStoreAdapter(SemanticChunkStore):
     def upsert(self, *, chunks: Sequence[SemanticChunkRecord], vectors: Sequence[Sequence[float]]) -> None:
         if len(chunks) != len(vectors):
             raise ValueError("chunks and vectors must have the same length")
-
-        if self._use_memory:
-            for chunk, vector in zip(chunks, vectors, strict=True):
-                raw_payload = self._build_payload(chunk)
-                encrypted = self._encrypt_if_configured(raw_payload, chunk)
-                self._memory_chunks[chunk.chunk_id] = (chunk, tuple(vector), encrypted)
-            return
 
         points = []
         for chunk, vector in zip(chunks, vectors, strict=True):
@@ -173,15 +144,13 @@ class QdrantSemanticChunkStoreAdapter(SemanticChunkStore):
             try:
                 with urllib.request.urlopen(req, timeout=30) as resp:
                     if resp.status not in (200, 201):
-                        logger.warning("Qdrant upsert returned %d", resp.status)
+                        raise RuntimeError(
+                            f"Qdrant upsert returned HTTP {resp.status}"
+                        )
             except Exception as e:
-                logger.warning("Qdrant upsert failed, falling back to in-memory: %s", e)
-                self._use_memory = True
-                # Re-do this batch in memory
-                for chunk, vector in zip(chunks[i:i + batch_size], vectors[i:i + batch_size], strict=True):
-                    raw_payload = self._build_payload(chunk)
-                    encrypted = self._encrypt_if_configured(raw_payload, chunk)
-                    self._memory_chunks[chunk.chunk_id] = (chunk, tuple(vector), encrypted)
+                raise RuntimeError(
+                    f"Qdrant upsert failed: {e.__class__.__name__}: {e}"
+                ) from e
 
     def search(
         self,
@@ -192,9 +161,6 @@ class QdrantSemanticChunkStoreAdapter(SemanticChunkStore):
         version: int | None = None,
         privacy: DocumentPrivacyClassification | None = None,
     ) -> list[SemanticChunkMatch]:
-        if self._use_memory:
-            return self._memory_search(query_vector, limit, document_id, version, privacy)
-
         # Build filter conditions
         must_filters = []
         if document_id is not None:
@@ -233,8 +199,9 @@ class QdrantSemanticChunkStoreAdapter(SemanticChunkStore):
             with urllib.request.urlopen(req, timeout=15) as resp:
                 data = json.loads(resp.read().decode())
         except Exception as e:
-            logger.error("Qdrant search failed: %s", e)
-            return []
+            raise RuntimeError(
+                f"Qdrant search failed: {e.__class__.__name__}: {e}"
+            ) from e
 
         results = []
         for hit in data.get("result", []):
@@ -261,15 +228,6 @@ class QdrantSemanticChunkStoreAdapter(SemanticChunkStore):
         return results
 
     def delete_document(self, document_id: str, version: int | None = None) -> None:
-        if self._use_memory:
-            to_delete = [
-                cid for cid, (chunk, _, _) in self._memory_chunks.items()
-                if chunk.document_id == document_id and (version is None or chunk.version == version)
-            ]
-            for cid in to_delete:
-                del self._memory_chunks[cid]
-            return
-
         must_filters = [{"key": "document_id", "match": {"value": document_id}}]
         if version is not None:
             must_filters.append({"key": "version", "match": {"value": version}})
@@ -284,14 +242,16 @@ class QdrantSemanticChunkStoreAdapter(SemanticChunkStore):
             with urllib.request.urlopen(req, timeout=15) as resp:
                 logger.debug("Deleted Qdrant points for document %s v%s", document_id, version)
         except Exception as e:
-            logger.error("Qdrant delete failed: %s", e)
+            raise RuntimeError(
+                f"Qdrant delete failed: {e.__class__.__name__}: {e}"
+            ) from e
 
     def close(self) -> None:
         pass  # No persistent connections to close
 
 
     def _build_payload(self, chunk: SemanticChunkRecord) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "chunk_id": chunk.chunk_id,
             "document_id": chunk.document_id,
             "version": chunk.version,
@@ -307,6 +267,18 @@ class QdrantSemanticChunkStoreAdapter(SemanticChunkStore):
             "content_type": chunk.content_type,
             "created_at": chunk.created_at.isoformat() if chunk.created_at else None,
         }
+        # Surface field_pointers as a top-level plaintext field so Qdrant
+        # can filter on it. The metadata copy is removed (still kept under
+        # the encrypted "metadata" key for back-compat).
+        if chunk.metadata and "field_pointers" in chunk.metadata:
+            payload["field_pointers"] = chunk.metadata.get("field_pointers")
+        if chunk.metadata and "owner_type" in chunk.metadata:
+            payload["owner_type"] = chunk.metadata.get("owner_type")
+        if chunk.metadata and "relation" in chunk.metadata:
+            payload["relation"] = chunk.metadata.get("relation")
+        if chunk.metadata and "relation_name" in chunk.metadata:
+            payload["relation_name"] = chunk.metadata.get("relation_name")
+        return payload
 
     def _encrypt_if_configured(
         self, payload: dict[str, Any], chunk: SemanticChunkRecord,
@@ -327,29 +299,6 @@ class QdrantSemanticChunkStoreAdapter(SemanticChunkStore):
             return payload
         from document_mgmt_service.infrastructure.encryption import decrypt_payload_with_date
         return decrypt_payload_with_date(payload, self._encryption_key)
-
-    def _memory_search(
-        self,
-        query_vector: Sequence[float],
-        limit: int,
-        document_id: str | None,
-        version: int | None,
-        privacy: DocumentPrivacyClassification | None,
-    ) -> list[SemanticChunkMatch]:
-        q = tuple(query_vector)
-        scored: list[SemanticChunkMatch] = []
-        for chunk, stored_vec, _payload in self._memory_chunks.values():
-            if document_id is not None and chunk.document_id != document_id:
-                continue
-            if version is not None and chunk.version != version:
-                continue
-            if privacy is not None and chunk.privacy != privacy:
-                continue
-            score = _cosine_similarity(q, stored_vec)
-            scored.append(SemanticChunkMatch(chunk=chunk, score=score))
-        scored.sort(key=lambda item: (-item.score, item.chunk.document_id, item.chunk.version, item.chunk.chunk_index))
-        return scored[:limit]
-
 
 def _cosine_similarity(left: Sequence[float], right: Sequence[float]) -> float:
     if not left or not right:

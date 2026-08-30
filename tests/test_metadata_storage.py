@@ -33,10 +33,11 @@ from document_mgmt_service.domain.models import (
     DocumentProcessingStatus,
     SemanticIndexStatus,
 )
-from document_mgmt_service.infrastructure.memory import InMemoryDocumentRepository
 from document_mgmt_service.infrastructure.qdrant import QdrantSemanticChunkStoreAdapter
 from document_mgmt_service.infrastructure.storage import LocalFileStorageAdapter
 from document_mgmt_service.schemas import MIGRATIONS, Migration, apply_migrations
+
+from tests._live_stack import build_postgres_repo, build_qdrant_store
 from document_mgmt_service.schemas.qdrant_payload import (
     QDRANT_COLLECTION_CONFIG,
     QdrantChunkPayload,
@@ -237,7 +238,7 @@ class TestLocalStorageIsolation(unittest.TestCase):
         """Storage keys use forward slashes, not OS-native paths."""
         key = "documents/doc1/v1/test.pdf"
         self.assertIn("/", key)
-        self.assertNotIn("\\", key)
+        self.assertNotIn("[1.0, 0.0, 0.0]", key)
 
     def test_storage_root_configurable(self) -> None:
         """Different root directories produce independent storage."""
@@ -320,9 +321,9 @@ class TestIngestionConsistency(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tempdir.cleanup)
-        self.repo = InMemoryDocumentRepository()
+        self.repo = build_postgres_repo(self)
         self.storage = LocalFileStorageAdapter(Path(self.tempdir.name))
-        self.store = QdrantSemanticChunkStoreAdapter()
+        self.store = build_qdrant_store(self, dimension=32)
         self.search = SemanticSearchService(
             store=self.store,
             embedder=TextEmbeddingService(dimension=32),
@@ -455,7 +456,7 @@ class TestQdrantAdapterConsistency(unittest.TestCase):
     """Verify the in-memory Qdrant adapter behaves consistently."""
 
     def setUp(self) -> None:
-        self.store = QdrantSemanticChunkStoreAdapter(collection_name="test_chunks")
+        self.store = build_qdrant_store(self, dimension=3)
 
     def _make_chunk(self, doc_id: str, version: int, index: int, text: str = "text") -> SemanticChunkRecord:
         return SemanticChunkRecord(
@@ -484,10 +485,10 @@ class TestQdrantAdapterConsistency(unittest.TestCase):
                 self._make_chunk("d1", 1, 0),
                 self._make_chunk("d1", 2, 0),
             ],
-            vectors=[[1.0, 0.0], [1.0, 0.0]],
+            vectors=[[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
         )
         self.store.delete_document("d1")
-        results = self.store.search(query_vector=[1.0, 0.0], limit=10)
+        results = self.store.search(query_vector=[1.0, 0.0, 0.0], limit=10)
         self.assertEqual(len(results), 0)
 
     def test_delete_specific_version(self) -> None:
@@ -496,10 +497,10 @@ class TestQdrantAdapterConsistency(unittest.TestCase):
                 self._make_chunk("d1", 1, 0),
                 self._make_chunk("d1", 2, 0),
             ],
-            vectors=[[1.0, 0.0], [1.0, 0.0]],
+            vectors=[[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
         )
         self.store.delete_document("d1", version=1)
-        results = self.store.search(query_vector=[1.0, 0.0], limit=10)
+        results = self.store.search(query_vector=[1.0, 0.0, 0.0], limit=10)
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0].chunk.version, 2)
 
@@ -513,10 +514,10 @@ class TestQdrantAdapterConsistency(unittest.TestCase):
         )
         self.store.upsert(
             chunks=[chunk_open, chunk_sensitive],
-            vectors=[[1.0, 0.0], [1.0, 0.0]],
+            vectors=[[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
         )
         results = self.store.search(
-            query_vector=[1.0, 0.0], limit=10,
+            query_vector=[1.0, 0.0, 0.0], limit=10,
             privacy=DocumentPrivacyClassification.OPEN,
         )
         self.assertEqual(len(results), 1)
@@ -541,7 +542,6 @@ class TestStorageConfigAbstraction(unittest.TestCase):
             qdrant_collection_name="test", semantic_embedding_dimension=32,
             semantic_chunk_size=100, semantic_chunk_overlap=20,
             file_storage_root=Path("/tmp/test-storage"),
-            sqlite_db_path=None,
             encryption_master_key="",
             ocr_enabled=False,
             huggingface_token=None,

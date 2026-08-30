@@ -1,3 +1,31 @@
 # Chitragupta — runtime dependencies
 # Mirrors pyproject.toml [project.dependencies]. Kept in sync manually.
-# Used by scripts/install-wsl.sh for WSL setup.
+# Used by scripts/install-wsl.sh for WSL setup and by `pip install -r
+# requirements.txt` for users who don't want the editable install.
+
+# Web framework + ASGI server
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+
+# HTTP / config
+requests>=2.31.0
+python-dotenv>=1.0.0
+
+# Image processing (used by OCR pre-processing)
+Pillow>=10.0.0
+
+# Metrics
+prometheus_client>=0.19.0
+
+# Postgres (Document repository)
+psycopg[binary]>=3.1.0
+
+# Symmetric encryption for Qdrant payload (Fernet)
+cryptography>=42.0.0
+
+# Model providers — vision-LLM inference with HuggingFace primary and
+# Groq fallback. Both are lazy-imported by the model service so they
+# must be present at install time or first-request import will fail.
+huggingface_hub>=0.24.0
+groq>=0.11.0

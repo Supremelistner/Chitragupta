@@ -100,12 +100,15 @@ class PostgreSQLRepositoryAdapter(PostgreSQLDocumentRepository):
                         created_at, updated_at, completed_at, error_message,
                         model_extraction, description_safe, description_detailed,
                         extraction_confidence, document_type, document_sub_type,
-                        language_primary, pii_types
+                        language_primary, pii_types,
+                        summary, extracted_fields, owner_type, relation, relation_name, expiry_date
                     )
                     VALUES (
                         %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                        %s::jsonb, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                        %s::jsonb, %s, %s, %s, %s, %s, %s, %s::jsonb
+                        %s::jsonb, %s, %s, %s, %s, %s, %s,
+                        COALESCE(%s, NOW()), COALESCE(%s, NOW()), %s, %s,
+                        %s::jsonb, %s, %s, %s, %s, %s, %s, %s::jsonb,
+                        %s, %s::jsonb, %s, %s, %s, %s
                     )
                     ON CONFLICT (document_id, version)
                     DO UPDATE SET
@@ -134,7 +137,13 @@ class PostgreSQLRepositoryAdapter(PostgreSQLDocumentRepository):
                         document_type = EXCLUDED.document_type,
                         document_sub_type = EXCLUDED.document_sub_type,
                         language_primary = EXCLUDED.language_primary,
-                        pii_types = EXCLUDED.pii_types
+                        pii_types = EXCLUDED.pii_types,
+                        summary = EXCLUDED.summary,
+                        extracted_fields = EXCLUDED.extracted_fields,
+                        owner_type = EXCLUDED.owner_type,
+                        relation = EXCLUDED.relation,
+                        relation_name = EXCLUDED.relation_name,
+                        expiry_date = EXCLUDED.expiry_date
                     """,
                     (
                         record.document_id,
@@ -166,6 +175,12 @@ class PostgreSQLRepositoryAdapter(PostgreSQLDocumentRepository):
                         record.document_sub_type,
                         record.language_primary,
                         json.dumps(record.pii_types) if record.pii_types else None,
+                        record.summary,
+                        json.dumps(record.extracted_fields, default=str) if record.extracted_fields else None,
+                        record.owner_type,
+                        record.relation,
+                        record.relation_name,
+                        record.expiry_date,
                     ),
                 )
             conn.commit()

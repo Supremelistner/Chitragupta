@@ -27,8 +27,9 @@ from document_mgmt_service.domain.models import (
     DocumentProcessingStatus,
 )
 from document_mgmt_service.infrastructure.document_validator import IngestionValidator
-from document_mgmt_service.infrastructure.memory import InMemoryDocumentRepository
 from document_mgmt_service.infrastructure.storage import LocalFileStorageAdapter
+
+from tests._live_stack import build_postgres_repo
 
 
 class _FakeOCR:
@@ -47,7 +48,7 @@ class TestIngestionValidation(unittest.TestCase):
     """Test that validation runs during ingestion."""
 
     def setUp(self):
-        self.repo = InMemoryDocumentRepository()
+        self.repo = build_postgres_repo(self)
         self.storage = LocalFileStorageAdapter(Path(tempfile.mkdtemp()))
         self.ocr = _FakeOCR()
         self.search = _FakeSemanticSearch()

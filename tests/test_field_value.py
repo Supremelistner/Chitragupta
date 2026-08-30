@@ -36,9 +36,10 @@ from document_mgmt_service.domain.models import (
     DocumentVersionRecord,
     SemanticIndexStatus,
 )
-from document_mgmt_service.infrastructure.memory import InMemoryDocumentRepository
 from document_mgmt_service.infrastructure.qdrant import QdrantSemanticChunkStoreAdapter
 from document_mgmt_service.infrastructure.storage import LocalFileStorageAdapter
+
+from tests._live_stack import build_postgres_repo, build_qdrant_store
 
 
 def _make_record(
@@ -74,7 +75,7 @@ def _make_record(
 
 class GetFieldValueUnitTests(unittest.TestCase):
     def setUp(self):
-        self.repo = InMemoryDocumentRepository()
+        self.repo = build_postgres_repo(self)
         self.repo.upsert_version(_make_record(
             extracted_fields={"aadhaar_number": "1234 5678 9012", "name": "Manish"},
             owner_type="SELF",
@@ -151,7 +152,7 @@ class GetFieldValueMCPTests(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tempdir.cleanup)
-        repo = InMemoryDocumentRepository()
+        repo = build_postgres_repo(self)
         repo.upsert_version(_make_record(
             document_id="mcp-test",
             extracted_fields={"aadhaar_number": "1234 5678 9012", "name": "Manish Rana"},
@@ -160,7 +161,7 @@ class GetFieldValueMCPTests(unittest.TestCase):
             summary="Aadhaar card",
         ))
         storage = LocalFileStorageAdapter(Path(self.tempdir.name))
-        store = QdrantSemanticChunkStoreAdapter()
+        store = build_qdrant_store(self, dimension=64)
         search = SemanticSearchService(
             store=store,
             embedder=TextEmbeddingService(dimension=64),
@@ -180,7 +181,7 @@ class GetFieldValueMCPTests(unittest.TestCase):
             mcp_transport="http", mcp_http_host="127.0.0.1", mcp_http_port=8085,
             postgres_dsn=None, qdrant_url=None, qdrant_collection_name="document_chunks",
             semantic_embedding_dimension=64, semantic_chunk_size=120, semantic_chunk_overlap=20,
-            file_storage_root=Path(self.tempdir.name), sqlite_db_path=None,
+            file_storage_root=Path(self.tempdir.name),
             encryption_master_key="", ocr_enabled=True,
             huggingface_token=None, huggingface_model_id="test",
             request_timeout_seconds=30,

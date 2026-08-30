@@ -40,18 +40,35 @@ class FallbackProvider(ModelProvider):
             self._fallback.ping()
 
     def infer(self, request: InferenceRequest) -> InferenceResult:
-        result = self._primary.infer(request)
+        try:
+            result = self._primary.infer(request)
+        except Exception as primary_exc:
+            # Primary raised rather than returning an ERROR: result. This
+            # happens for connection errors, timeouts, or import errors.
+            logger.warning(
+                "Primary provider raised %s (%s) — falling back to secondary",
+                primary_exc.__class__.__name__, primary_exc,
+            )
+            fallback_result = self._fallback.infer(request)
+            meta = dict(fallback_result.metadata or {})
+            meta["used_fallback"] = True
+            meta["primary_error"] = f"{primary_exc.__class__.__name__}: {primary_exc}"
+            return replace(fallback_result, metadata=meta)
 
         if result.output and result.output.startswith("ERROR:"):
             error_msg = result.output.lower()
             is_recoverable = any(
                 kw in error_msg
-                for kw in ["402", "429", "payment required", "rate limit",
-                           "quota", "credit", "insufficient", "timeout"]
+                for kw in [
+                    "402", "429", "payment required", "rate limit",
+                    "quota", "credit", "insufficient", "timeout",
+                    "connection", "unreachable", "service unavailable",
+                    "503", "504", "gateway",
+                ]
             )
             if is_recoverable:
                 logger.warning(
-                    "Primary provider failed (%s), falling back to Groq",
+                    "Primary provider failed (%s), falling back to secondary",
                     result.output[:100],
                 )
                 fallback_result = self._fallback.infer(request)

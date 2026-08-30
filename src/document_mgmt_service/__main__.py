@@ -8,7 +8,7 @@ from typing import Any
 from document_mgmt_service.adapters.http.health_server import DocumentManagementHTTPServer
 from document_mgmt_service.adapters.mcp.server import MCPServer
 from document_mgmt_service.application.access import DocumentAccessService
-from document_mgmt_service.application.health import HealthService
+from document_mgmt_service.application.health import DependencyState, HealthService
 from document_mgmt_service.application.ingestion import IngestionDependencies, IngestionService
 from document_mgmt_service.application.search import SemanticChunker, SemanticSearchService, TextEmbeddingService
 from document_mgmt_service.config import AppConfig
@@ -31,47 +31,109 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--http-only",
         action="store_true",
-        help="Run only the HTTP server",
+        help="Run only the REST HTTP server",
     )
     parser.add_argument(
         "--mcp-only",
         action="store_true",
-        help="Run only the MCP server over stdio",
+        help="Run only the MCP server (use --mcp-transport to pick stdio or http)",
+    )
+    parser.add_argument(
+        "--mcp-transport",
+        choices=("stdio", "http"),
+        default=None,
+        help="MCP transport (default: from DOCUMENT_SERVICE_MCP_TRANSPORT, else 'stdio')",
+    )
+    parser.add_argument(
+        "--mcp-http-host",
+        default=None,
+        help="MCP HTTP transport host (default: DOCUMENT_SERVICE_MCP_HTTP_HOST)",
+    )
+    parser.add_argument(
+        "--mcp-http-port",
+        type=int,
+        default=None,
+        help="MCP HTTP transport port (default: DOCUMENT_SERVICE_MCP_HTTP_PORT)",
     )
     return parser
 
 
+def _ping_dependency(name: str, target):
+    """Call ``target.ping()`` and convert the result into a DependencyState."""
+    ping = getattr(target, "ping", None)
+    if ping is None:
+        return DependencyState(name=name, healthy=True, details={"note": "no ping()"})
+    try:
+        ping()
+        return DependencyState(name=name, healthy=True)
+    except Exception as exc:
+        return DependencyState(
+            name=name,
+            healthy=False,
+            details={"error": f"{exc.__class__.__name__}: {exc}"},
+        )
+
+
 def _build_repository(config: AppConfig):
     if config.postgres_dsn:
-        repository = PostgreSQLRepositoryAdapter(
-            create_psycopg_connection_factory(config.postgres_dsn)
-        )
-        repository.ensure_schema()
-        print(f"Using PostgreSQL: {config.postgres_dsn}")
-        return repository
-    # SQLite: persistent, zero-config, survives restarts
+        try:
+            repository = PostgreSQLRepositoryAdapter(
+                create_psycopg_connection_factory(config.postgres_dsn)
+            )
+            repository.ensure_schema()
+            print(f"Using PostgreSQL: {config.postgres_dsn}")
+            return repository, _ping_dependency("postgres", repository)
+        except Exception as exc:
+            # Postgres was requested but is unreachable (no Docker, wrong
+            # port, missing creds, etc). Fall back to SQLite so the rest
+            # of the stack stays usable in dev. Log a clear warning.
+            print(
+                f"  ⚠ PostgreSQL unavailable ({exc.__class__.__name__}: {exc}); "
+                f"falling back to SQLite."
+            )
+            db_path = config.sqlite_db_path or "./data/chitragupta.db"
+            repository = SQLiteDocumentRepository(db_path=db_path)
+            print(f"Using SQLite: {db_path}")
+            return repository, DependencyState(
+                name="postgres",
+                healthy=False,
+                details={"error": f"{exc.__class__.__name__}: {exc}", "fallback": "sqlite", "path": db_path},
+            )
     db_path = config.sqlite_db_path or "./data/chitragupta.db"
     repository = SQLiteDocumentRepository(db_path=db_path)
     print(f"Using SQLite: {db_path}")
-    return repository
+    return repository, DependencyState(
+        name="postgres",
+        healthy=True,
+        details={"mode": "sqlite", "path": db_path},
+    )
 
 
-def _build_semantic_search(config: AppConfig) -> SemanticSearchService:
+def _build_semantic_search(config: AppConfig) -> tuple[SemanticSearchService, DependencyState]:
     if config.qdrant_url:
+        strict = config.environment.lower() != "development"
         store = QdrantSemanticChunkStoreAdapter(
             base_url=config.qdrant_url,
             collection_name=config.qdrant_collection_name,
             encryption_key=config.encryption_master_key,
+            strict=strict,
         )
         store.set_dimension(config.semantic_embedding_dimension)
         enc_status = "encrypted" if config.encryption_master_key else "plaintext"
-        print(f"Using Qdrant: {config.qdrant_url} (payloads {enc_status})")
+        mode = "strict" if strict else "dev (in-memory fallback)"
+        print(f"Using Qdrant: {config.qdrant_url} (payloads {enc_status}, {mode})")
+        state = _ping_dependency("qdrant", store)
     else:
         # SQLite: persistent vector store, zero-config
         db_path = config.sqlite_db_path or "./data/chitragupta.db"
         store = SQLiteVectorStore(db_path=db_path)
         store.set_dimension(config.semantic_embedding_dimension)
         print(f"Using SQLite vector store: {db_path}")
+        state = DependencyState(
+            name="qdrant",
+            healthy=True,
+            details={"mode": "sqlite", "path": db_path},
+        )
     return SemanticSearchService(
         store=store,
         embedder=TextEmbeddingService(dimension=config.semantic_embedding_dimension),
@@ -79,7 +141,7 @@ def _build_semantic_search(config: AppConfig) -> SemanticSearchService:
             max_chunk_chars=config.semantic_chunk_size,
             chunk_overlap=config.semantic_chunk_overlap,
         ),
-    )
+    ), state
 
 
 def _build_model_provider(config: AppConfig):
@@ -122,6 +184,23 @@ def _build_model_provider(config: AppConfig):
                     raise RuntimeError(result.output)
                 return _json.loads(result.output)
 
+            def extract_metadata(self, image_bytes: bytes, mime_type: str) -> dict[str, Any]:
+                """Pull structured metadata (fields, ownership, expiry) from the document.
+
+                Uses the METADATA_EXTRACTION task, which now also returns the
+                owner / relation / expiry block.
+                """
+                import json as _json
+                request = InferenceRequest(
+                    task=InferenceTaskType.METADATA_EXTRACTION,
+                    image_bytes=image_bytes,
+                    image_mime_type=mime_type,
+                )
+                result = hf_adapter.infer(request)
+                if result.output.startswith("ERROR:"):
+                    raise RuntimeError(result.output)
+                return _json.loads(result.output)
+
         return _ModelClient()
     except Exception as exc:
         print(f"Warning: Could not initialize model service: {exc}")
@@ -134,12 +213,19 @@ def main() -> None:
         http_host=args.http_host,
         http_port=args.http_port,
     )
+    # CLI overrides for MCP transport
+    if args.mcp_transport is not None:
+        object.__setattr__(config, "mcp_transport", args.mcp_transport)
+    if args.mcp_http_host is not None:
+        object.__setattr__(config, "mcp_http_host", args.mcp_http_host)
+    if args.mcp_http_port is not None:
+        object.__setattr__(config, "mcp_http_port", args.mcp_http_port)
     configure_logging(config.log_level)
     install_exception_hooks()
 
-    repository = _build_repository(config)
+    repository, repo_state = _build_repository(config)
     storage = LocalFileStorageAdapter(config.file_storage_root)
-    semantic_search = _build_semantic_search(config)
+    semantic_search, qdrant_state = _build_semantic_search(config)
 
     # Build model-backed OCR or fall back to NullOCR
     model_provider = _build_model_provider(config)
@@ -169,7 +255,7 @@ def main() -> None:
             validator=validator,
         )
     )
-    health_service = HealthService(config=config)
+    health_service = HealthService(config=config, dependencies=[repo_state, qdrant_state])
 
     http_server = None
     http_thread = None
@@ -200,12 +286,26 @@ def main() -> None:
             http_thread.start()
 
         if not args.http_only:
-            MCPServer(
+            mcp_server = MCPServer(
                 config=config,
                 health_service=health_service,
                 ingestion_service=ingestion_service,
                 access_service=access_service,
-            ).serve()
+            )
+            if config.is_mcp_http():
+                from document_mgmt_service.adapters.mcp.http_server import run as run_mcp_http
+                print(
+                    f"Starting MCP HTTP transport on "
+                    f"{config.mcp_http_host}:{config.mcp_http_port} "
+                    f"(POST /mcp, GET /mcp/health, GET /mcp/sse)"
+                )
+                run_mcp_http(
+                    mcp_server,
+                    host=config.mcp_http_host,
+                    port=config.mcp_http_port,
+                )
+            else:
+                mcp_server.serve()
         else:
             stop_event.wait()
     finally:

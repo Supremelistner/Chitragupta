@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import signal
 import threading
 from typing import Any
@@ -13,13 +14,10 @@ from document_mgmt_service.application.ingestion import IngestionDependencies, I
 from document_mgmt_service.application.search import SemanticChunker, SemanticSearchService, TextEmbeddingService
 from document_mgmt_service.config import AppConfig
 from document_mgmt_service.infrastructure.document_validator import IngestionValidator
-from document_mgmt_service.infrastructure.memory import InMemoryDocumentRepository
 from document_mgmt_service.infrastructure.model_ocr import ModelOCRAdapter
 from document_mgmt_service.infrastructure.ocr import NullOCRAdapter
 from document_mgmt_service.infrastructure.postgres import PostgreSQLRepositoryAdapter, create_psycopg_connection_factory
 from document_mgmt_service.infrastructure.qdrant import QdrantSemanticChunkStoreAdapter
-from document_mgmt_service.infrastructure.sqlite_repo import SQLiteDocumentRepository
-from document_mgmt_service.infrastructure.sqlite_vector import SQLiteVectorStore
 from document_mgmt_service.infrastructure.storage import LocalFileStorageAdapter
 from document_mgmt_service.logging import configure_logging, install_exception_hooks
 
@@ -75,65 +73,50 @@ def _ping_dependency(name: str, target):
 
 
 def _build_repository(config: AppConfig):
-    if config.postgres_dsn:
-        try:
-            repository = PostgreSQLRepositoryAdapter(
-                create_psycopg_connection_factory(config.postgres_dsn)
-            )
-            repository.ensure_schema()
-            print(f"Using PostgreSQL: {config.postgres_dsn}")
-            return repository, _ping_dependency("postgres", repository)
-        except Exception as exc:
-            # Postgres was requested but is unreachable (no Docker, wrong
-            # port, missing creds, etc). Fall back to SQLite so the rest
-            # of the stack stays usable in dev. Log a clear warning.
-            print(
-                f"  ⚠ PostgreSQL unavailable ({exc.__class__.__name__}: {exc}); "
-                f"falling back to SQLite."
-            )
-            db_path = config.sqlite_db_path or "./data/chitragupta.db"
-            repository = SQLiteDocumentRepository(db_path=db_path)
-            print(f"Using SQLite: {db_path}")
-            return repository, DependencyState(
-                name="postgres",
-                healthy=False,
-                details={"error": f"{exc.__class__.__name__}: {exc}", "fallback": "sqlite", "path": db_path},
-            )
-    db_path = config.sqlite_db_path or "./data/chitragupta.db"
-    repository = SQLiteDocumentRepository(db_path=db_path)
-    print(f"Using SQLite: {db_path}")
-    return repository, DependencyState(
-        name="postgres",
-        healthy=True,
-        details={"mode": "sqlite", "path": db_path},
+    """Build the document repository. Postgres via Docker is the only
+    supported backend. If the connection fails, fail fast — the operator
+    should bring the Postgres container up rather than silently degrade.
+    """
+    if not config.postgres_dsn:
+        raise SystemExit(
+            "DOCUMENT_SERVICE_POSTGRES_DSN is not set. "
+            "The document service requires a Postgres connection (typically "
+            "the docker compose stack on localhost:5432). "
+            "Run `python activate.py --bg` to start the infrastructure, "
+            "or set the env var to your own Postgres URL."
+        )
+    repository = PostgreSQLRepositoryAdapter(
+        create_psycopg_connection_factory(config.postgres_dsn)
     )
+    repository.ensure_schema()
+    print(f"Using PostgreSQL: {config.postgres_dsn}")
+    return repository, _ping_dependency("postgres", repository)
 
 
 def _build_semantic_search(config: AppConfig) -> tuple[SemanticSearchService, DependencyState]:
-    if config.qdrant_url:
-        strict = config.environment.lower() != "development"
-        store = QdrantSemanticChunkStoreAdapter(
-            base_url=config.qdrant_url,
-            collection_name=config.qdrant_collection_name,
-            encryption_key=config.encryption_master_key,
-            strict=strict,
+    """Build the semantic search service. Qdrant via Docker is the only
+    supported vector store. The adapter is always in strict mode — a
+    broken Qdrant container must surface as an error, never silently
+    fall back to a local in-memory store.
+    """
+    if not config.qdrant_url:
+        raise SystemExit(
+            "DOCUMENT_SERVICE_QDRANT_URL is not set. "
+            "The document service requires a Qdrant connection (typically "
+            "the docker compose stack on http://localhost:6333). "
+            "Run `python activate.py --bg` to start the infrastructure, "
+            "or set the env var to your own Qdrant URL."
         )
-        store.set_dimension(config.semantic_embedding_dimension)
-        enc_status = "encrypted" if config.encryption_master_key else "plaintext"
-        mode = "strict" if strict else "dev (in-memory fallback)"
-        print(f"Using Qdrant: {config.qdrant_url} (payloads {enc_status}, {mode})")
-        state = _ping_dependency("qdrant", store)
-    else:
-        # SQLite: persistent vector store, zero-config
-        db_path = config.sqlite_db_path or "./data/chitragupta.db"
-        store = SQLiteVectorStore(db_path=db_path)
-        store.set_dimension(config.semantic_embedding_dimension)
-        print(f"Using SQLite vector store: {db_path}")
-        state = DependencyState(
-            name="qdrant",
-            healthy=True,
-            details={"mode": "sqlite", "path": db_path},
-        )
+    store = QdrantSemanticChunkStoreAdapter(
+        base_url=config.qdrant_url,
+        collection_name=config.qdrant_collection_name,
+        encryption_key=config.encryption_master_key,
+        dimension=config.semantic_embedding_dimension,
+        strict=True,
+    )
+    enc_status = "encrypted" if config.encryption_master_key else "plaintext"
+    print(f"Using Qdrant: {config.qdrant_url} (payloads {enc_status}, strict)")
+    state = _ping_dependency("qdrant", store)
     return SemanticSearchService(
         store=store,
         embedder=TextEmbeddingService(dimension=config.semantic_embedding_dimension),
@@ -145,7 +128,14 @@ def _build_semantic_search(config: AppConfig) -> tuple[SemanticSearchService, De
 
 
 def _build_model_provider(config: AppConfig):
-    """Build model service adapter if HF token is configured."""
+    """Build model service adapter if HF token is configured.
+
+    When a Groq API key is also available, wraps the primary HuggingFace
+    adapter in a :class:`FallbackProvider` so that 402 (Payment Required),
+    429 (Rate Limit), timeouts, and 5xx errors automatically fall through
+    to Groq. This keeps the ingestion pipeline operational when HF
+    inference credits are exhausted.
+    """
     if not config.huggingface_token:
         return None
     try:
@@ -157,6 +147,22 @@ def _build_model_provider(config: AppConfig):
             model_id=config.huggingface_model_id,
             timeout_seconds=config.request_timeout_seconds,
         )
+
+        # Wrap with Groq fallback when both are available
+        groq_api_key = os.environ.get("GROQ_API_KEY")
+        if groq_api_key:
+            try:
+                from model_service.infrastructure.groq_provider import GroqProviderAdapter
+                from model_service.infrastructure.fallback_provider import FallbackProvider
+                groq = GroqProviderAdapter(
+                    api_key=groq_api_key,
+                    model_id=os.environ.get("GROQ_VL_MODEL", "qwen/qwen3.8-27b"),
+                    timeout_seconds=config.request_timeout_seconds,
+                )
+                hf_adapter = FallbackProvider(primary=hf_adapter, fallback=groq)
+                print("  Model fallback: Groq (activates on HF 402/429/timeout/5xx)")
+            except Exception as exc:
+                print(f"  Warning: could not initialize Groq fallback: {exc}")
 
         class _ModelClient:
             """Wraps the HF adapter for text extraction and classification."""
@@ -316,7 +322,7 @@ def main() -> None:
         repository.close()
         storage.close()
         ocr.close()
-        # Close vector store if it has a close method (SQLite, not in-memory)
+        # Close vector store (always Qdrant; close() is a no-op there)
         if hasattr(semantic_search, '_store') and hasattr(semantic_search._store, 'close'):
             semantic_search._store.close()
 

@@ -265,47 +265,123 @@ def ensure_dirs() -> None:
     PID_FILE.parent.mkdir(parents=True, exist_ok=True)
 
 
+def _docker_compose_up() -> bool:
+    """Bring up the docker compose stack using whatever compose binary is
+    available. Tries (in order): docker compose v2, docker-compose v1, then
+    docker compose v2 with an explicit -f flag (handy when run from outside
+    the project dir). Returns True if a compose invocation was issued and
+    the binary returned 0, else False.
+    """
+    compose_file = str(Path(__file__).resolve().parent / "docker-compose.yml")
+    invocations = [
+        ["docker", "compose", "up", "-d"],
+        ["docker-compose", "up", "-d"],
+        ["docker", "compose", "-f", compose_file, "up", "-d"],
+    ]
+    for cmd in invocations:
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        except FileNotFoundError:
+            continue
+        except Exception as e:
+            print(f"  {DIM}compose {cmd!r} failed: {e}{RESET}")
+            continue
+        if r.returncode == 0:
+            print(f"  {DIM}compose ok: {' '.join(cmd)}{RESET}")
+            return True
+        # Show only the last useful line of stderr so the user can see why
+        err = (r.stderr or r.stdout or "").strip().splitlines()
+        tail = err[-1] if err else ""
+        print(f"  {DIM}compose {' '.join(cmd)} rc={r.returncode}: {tail}{RESET}")
+    return False
+
+
+def _docker_compose_down() -> bool:
+    """Tear down the compose stack using the same fallback chain as _up."""
+    compose_file = str(Path(__file__).resolve().parent / "docker-compose.yml")
+    invocations = [
+        ["docker", "compose", "down"],
+        ["docker-compose", "down"],
+        ["docker", "compose", "-f", compose_file, "down"],
+    ]
+    for cmd in invocations:
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        except FileNotFoundError:
+            continue
+        except Exception as e:
+            print(f"  {DIM}compose {cmd!r} failed: {e}{RESET}")
+            continue
+        if r.returncode == 0:
+            return True
+    return False
+
+
+def _infra_ports_ready(timeout: float = 60.0) -> bool:
+    """Wait until Postgres (5432) and Qdrant (6333) are both listening,
+    or `timeout` seconds elapse. Returns True only if both ports became
+    open. Polls every 1s.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if is_port_open(5432) and is_port_open(6333):
+            return True
+        time.sleep(1)
+    return False
+
+
 def start_docker() -> None:
-    """Start PostgreSQL and Qdrant via Docker Compose if not running."""
+    """Ensure PostgreSQL (5432) and Qdrant (6333) are up.
+
+    Detection is by port, not by `docker compose ps`, because:
+      * the v1 `docker-compose` doesn't reliably support `--format json`
+      * containers may have been started outside this project
+      * the daemon may be reachable on the WSL socket even when no
+        compose project is loaded in the current working directory
+
+    If the ports are already listening we skip cleanly. Otherwise we try
+    the docker compose stack and poll for readiness. We do NOT swallow
+    failures: native (in-memory / sqlite) DB backends have been removed
+    from this project, so the document service will not start without a
+    real Postgres + Qdrant. Hard-fail with a clear error in that case.
+    """
     if IS_WSL:
         print(f"  {DIM}Detected WSL — using Docker Desktop's Linux engine over the WSL socket{RESET}")
-    try:
-        result = subprocess.run(
-            ["docker", "compose", "ps", "--format", "json"],
-            capture_output=True, text=True, timeout=10,
+    elif IS_LINUX:
+        print(f"  {DIM}Detected Linux — using local Docker daemon{RESET}")
+    elif IS_MAC:
+        print(f"  {DIM}Detected macOS — using local Docker daemon{RESET}")
+
+    pg_ok = is_port_open(5432)
+    qd_ok = is_port_open(6333)
+    if pg_ok and qd_ok:
+        print(f"  \033[32m✓{RESET} Docker: PostgreSQL :5432 + Qdrant :6333 already running")
+        return
+
+    print(
+        f"  \033[33m⟳{RESET} Docker: PostgreSQL {'up' if pg_ok else 'down'} :5432, "
+        f"Qdrant {'up' if qd_ok else 'down'} :6333 — starting compose stack..."
+    )
+    if not _docker_compose_up():
+        sys.exit(
+            "\n  \033[31m✗ Docker compose failed to start the stack.\n"
+            "    The document service no longer supports in-memory or\n"
+            "    SQLite backends — PostgreSQL and Qdrant are required.\n"
+            "    Verify that the Docker daemon is running and that you can\n"
+            "    invoke `docker compose` (or `docker-compose`) manually,\n"
+            "    then re-run `python activate.py --bg`.\n"
         )
-        if result.returncode != 0:
-            print(f"  {DIM}Docker Compose not available — skipping infrastructure{RESET}")
-            return
 
-        running = set()
-        for line in result.stdout.strip().split("\n"):
-            if not line:
-                continue
-            try:
-                svc = json.loads(line)
-                if svc.get("State") == "running":
-                    running.add(svc.get("Service", ""))
-            except json.JSONDecodeError:
-                pass
+    if _infra_ports_ready(timeout=60):
+        print(f"  \033[32m✓{RESET} Docker: PostgreSQL + Qdrant ready")
+        return
 
-        needed = {"postgres", "qdrant"}
-        if needed.issubset(running):
-            print(f"  \033[32m✓{RESET} Docker: PostgreSQL + Qdrant already running")
-            return
-
-        print(f"  \033[33m⟳{RESET} Docker: Starting PostgreSQL + Qdrant...")
-        subprocess.run(
-            ["docker", "compose", "up", "-d"],
-            capture_output=True, timeout=60,
-        )
-        # Wait for health
-        time.sleep(8)
-        print(f"  \033[32m✓{RESET} Docker: PostgreSQL + Qdrant started")
-    except FileNotFoundError:
-        print(f"  {DIM}Docker not found — skipping infrastructure{RESET}")
-    except Exception as e:
-        print(f"  {DIM}Docker start failed: {e}{RESET}")
+    sys.exit(
+        "\n  \033[31m✗ Docker compose started but Postgres/Qdrant never became reachable.\n"
+        "    Check `docker compose ps` and `docker compose logs`.\n"
+        "    Most common cause: the 5432/6333 ports are already in use\n"
+        "    by a host-level Postgres or a previous Qdrant process.\n"
+    )
 
 
 def is_port_open(port: int) -> bool:

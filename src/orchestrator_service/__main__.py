@@ -89,8 +89,17 @@ def main() -> None:
             temperature=config.llm_temperature,
             max_tokens=config.llm_max_tokens,
         )
-        llm = FallbackLLMProvider(primary=primary_llm, fallback=groq_llm)
-        logger.info("LLM fallback enabled: Groq (%s)", config.groq_model_id)
+        if not config.hf_token:
+            # HF credits exhausted - route every chat call straight through
+            # Groq instead of wasting a 401 round-trip on the primary.
+            llm = groq_llm
+            logger.info(
+                "LLM primary: Groq (%s) - HF_TOKEN empty, skipping primary HF",
+                config.groq_model_id,
+            )
+        else:
+            llm = FallbackLLMProvider(primary=primary_llm, fallback=groq_llm)
+            logger.info("LLM fallback enabled: Groq (%s)", config.groq_model_id)
     else:
         llm = primary_llm
 

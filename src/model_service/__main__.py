@@ -28,7 +28,24 @@ def _build_providers(config: ModelServiceConfig) -> dict[str, HuggingFaceProvide
     """Build provider adapters from config. Add new providers here."""
     providers = {}
 
-    # HuggingFace (default — works on free tier)
+    # If HF_TOKEN is empty AND Groq is configured as fallback, use Groq as the sole
+    # primary. We alias the Groq adapter under the huggingface key so the repository
+    # still tracks active_provider=huggingface (no caller change needed). When you
+    # refill HF credits next month, set HF_TOKEN again and the system reverts to the
+    # old wrap-with-fallback behavior automatically.
+    if not config.huggingface_token and config.fallback_provider == "groq" and config.groq_api_key:
+        from model_service.infrastructure.groq_provider import GroqProviderAdapter
+        providers["huggingface"] = GroqProviderAdapter(
+            api_key=config.groq_api_key,
+            model_id=config.groq_model_id,
+            timeout_seconds=config.request_timeout_seconds,
+            temperature=config.default_temperature,
+            max_tokens=config.default_max_tokens,
+        )
+        print(f"  Primary: Groq ({config.groq_model_id}) -- HF_TOKEN empty, serving as the sole model provider")
+        return providers
+
+    # HuggingFace (default -- works on free tier)
     providers["huggingface"] = HuggingFaceProviderAdapter(
         token=config.huggingface_token,
         model_id=config.huggingface_model_id,
@@ -51,7 +68,7 @@ def _build_providers(config: ModelServiceConfig) -> dict[str, HuggingFaceProvide
         # Wrap the primary HF provider with fallback
         primary = providers["huggingface"]
         providers["huggingface"] = FallbackProvider(primary=primary, fallback=groq)
-        print(f"  Fallback: Groq ({config.groq_model_id}) — activates on HF errors / timeouts / 402/429 / 5xx")
+        print(f"  Fallback: Groq ({config.groq_model_id}) -- activates on HF errors / timeouts / 402/429 / 5xx")
 
     # Future providers can be added here:
     # if config.fireworks_api_key:

@@ -546,6 +546,131 @@ class TestOrchestrationEngine(unittest.TestCase):
         )
         self.assertIn("OK", response2.message)
 
+    def test_field_approval_cache_skips_second_prompt(self):
+        """After approving get_field_value for a specific (doc, ver, field),
+        the second call for the same key should execute without prompting.
+        """
+        session = self.engine.create_session()
+        tool_call = {
+            "id": "tc_fv_1",
+            "type": "function",
+            "function": {
+                "name": "get_field_value",
+                "arguments": chr(123) + chr(34) + "document_id" + chr(34) + ": " + chr(34) + "doc-1" + chr(34) + ", " + chr(34) + "version" + chr(34) + ": 1, " + chr(34) + "field" + chr(34) + ": " + chr(34) + "aadhaar_number" + chr(34) + ", " + chr(34) + "confirm" + chr(34) + ": false" + chr(125),
+            },
+        }
+        # First call: should prompt
+        self.mock_llm.chat.return_value = LLMResponse(content="", tool_calls=[tool_call])
+        r1 = self.engine.process_message(session.session_id, "what is my aadhaar number?")
+        self.assertIsNotNone(r1.confirmation_required, "first call should still prompt")
+        # User approves
+        self.mock_llm.chat.return_value = LLMResponse(content="Here is the value")
+        self.engine.handle_confirmation(
+            session.session_id, r1.confirmation_required.request_id, approved=True,
+        )
+        # Second call (same doc, same field) within TTL: should NOT prompt
+        tool_call_2 = dict(tool_call)
+        tool_call_2["id"] = "tc_fv_2"
+        self.mock_llm.chat.return_value = LLMResponse(content="", tool_calls=[tool_call_2])
+        r2 = self.engine.process_message(session.session_id, "show me again")
+        self.assertIsNone(r2.confirmation_required, "second call within TTL should NOT prompt")
+    def test_field_approval_cache_different_field_still_prompts(self):
+        """Approval for one field does not carry to a different field."""
+        session = self.engine.create_session()
+
+        def make_call(call_id, field):
+            args = (
+                chr(123) + "document_id: doc-1, version: 1, field: "
+                + field
+                + ", confirm: false" + chr(125)
+            )
+            args = "{" + args + "}"
+            return LLMResponse(
+                content="",
+                tool_calls=[{
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": "get_field_value",
+                        "arguments": args,
+                    },
+                }],
+            )
+
+        self.mock_llm.chat.return_value = make_call("t1", "aadhaar_number")
+        r1 = self.engine.process_message(session.session_id, "aadhaar?")
+        self.assertIsNotNone(r1.confirmation_required)
+        self.mock_llm.chat.return_value = LLMResponse(content="done")
+        self.engine.handle_confirmation(
+            session.session_id, r1.confirmation_required.request_id, approved=True
+        )
+        self.mock_llm.chat.return_value = make_call("t2", "name")
+        r2 = self.engine.process_message(session.session_id, "name?")
+        self.assertIsNotNone(
+            r2.confirmation_required, "different field should still prompt"
+        )
+
+    def test_field_approval_cache_different_doc_still_prompts(self):
+        """Approval for one document does not carry to a different document."""
+        session = self.engine.create_session()
+        def make_call(call_id, doc_id):
+            args = '{"document_id": "' + doc_id + '", "version": 1, "field": "aadhaar_number", "confirm": false}'
+            return LLMResponse(content="", tool_calls=[{"id": call_id, "type": "function", "function": {"name": "get_field_value", "arguments": args}}])
+        self.mock_llm.chat.return_value = make_call("t1", "doc-A")
+        r1 = self.engine.process_message(session.session_id, "aadhaar?")
+        self.assertIsNotNone(r1.confirmation_required)
+        self.mock_llm.chat.return_value = LLMResponse(content="done")
+        self.engine.handle_confirmation(session.session_id, r1.confirmation_required.request_id, approved=True)
+        self.mock_llm.chat.return_value = make_call("t2", "doc-B")
+        r2 = self.engine.process_message(session.session_id, "aadhaar?")
+        self.assertIsNotNone(r2.confirmation_required, "different document should still prompt")
+
+    def test_field_approval_cache_deny_does_not_populate(self):
+        """Denying a confirmation does not cache an approval."""
+        session = self.engine.create_session()
+        tc = {"id": "tc_fv", "type": "function", "function": {"name": "get_field_value", "arguments": '{"document_id": "doc-1", "version": 1, "field": "aadhaar_number", "confirm": false}'}}
+        self.mock_llm.chat.return_value = LLMResponse(content="", tool_calls=[tc])
+        r1 = self.engine.process_message(session.session_id, "aadhaar?")
+        self.assertIsNotNone(r1.confirmation_required)
+        self.mock_llm.chat.return_value = LLMResponse(content="OK")
+        self.engine.handle_confirmation(session.session_id, r1.confirmation_required.request_id, approved=False)
+        tc2 = dict(tc); tc2["id"] = "tc_fv_2"
+        self.mock_llm.chat.return_value = LLMResponse(content="", tool_calls=[tc2])
+        r2 = self.engine.process_message(session.session_id, "aadhaar?")
+        self.assertIsNotNone(r2.confirmation_required, "denial should not populate cache")
+
+    def test_field_approval_cache_ttl_expiry(self):
+        """After TTL expires, the next call should re-prompt."""
+        import time as _t
+        self.engine._field_approval_ttl_seconds = 0
+        session = self.engine.create_session()
+        tc = {"id": "tc_fv", "type": "function", "function": {"name": "get_field_value", "arguments": '{"document_id": "doc-1", "version": 1, "field": "aadhaar_number", "confirm": false}'}}
+        self.mock_llm.chat.return_value = LLMResponse(content="", tool_calls=[tc])
+        r1 = self.engine.process_message(session.session_id, "aadhaar?")
+        self.assertIsNotNone(r1.confirmation_required)
+        self.mock_llm.chat.return_value = LLMResponse(content="done")
+        self.engine.handle_confirmation(session.session_id, r1.confirmation_required.request_id, approved=True)
+        _t.sleep(0.05)
+        tc2 = dict(tc); tc2["id"] = "tc_fv_2"
+        self.mock_llm.chat.return_value = LLMResponse(content="", tool_calls=[tc2])
+        r2 = self.engine.process_message(session.session_id, "aadhaar?")
+        self.assertIsNotNone(r2.confirmation_required, "expired TTL should re-prompt")
+
+    def test_field_approval_cache_only_for_get_field_value(self):
+        """Other gated tools (get_evidence, get_document) should still prompt on every call. Only get_field_value is cacheable."""
+        session = self.engine.create_session()
+        tc = {"id": "tc_evidence", "type": "function", "function": {"name": "get_evidence", "arguments": '{"document_id": "doc-1", "version": 1, "query": "ocr"}'}}
+        self.mock_llm.chat.return_value = LLMResponse(content="", tool_calls=[tc])
+        r1 = self.engine.process_message(session.session_id, "show evidence")
+        self.assertIsNotNone(r1.confirmation_required)
+        self.mock_llm.chat.return_value = LLMResponse(content="done")
+        self.engine.handle_confirmation(session.session_id, r1.confirmation_required.request_id, approved=True)
+        tc2 = dict(tc); tc2["id"] = "tc_evidence_2"
+        self.mock_llm.chat.return_value = LLMResponse(content="", tool_calls=[tc2])
+        r2 = self.engine.process_message(session.session_id, "show evidence again")
+        self.assertIsNotNone(r2.confirmation_required, "get_evidence should still prompt")
+
+
     def test_delete_session(self):
         session = self.engine.create_session()
         self.assertTrue(self.engine.delete_session(session.session_id))

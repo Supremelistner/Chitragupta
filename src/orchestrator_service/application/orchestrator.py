@@ -12,6 +12,8 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
+import os
 from typing import Any
 
 from orchestrator_service.domain.models import (
@@ -87,6 +89,16 @@ RESPONSE STYLE
 """
 
 
+def session_fallback_user_id(sessions) -> str:
+    """Best-effort user_id when none is set on the engine.
+
+    Used as the namespace for field-approval caching when the
+    orchestrator is configured without a user_id (e.g. local dev).
+    Falls back to a static local user marker.
+    """
+    return "__local__"
+
+
 class OrchestrationEngine:
     """Core engine that orchestrates tool calls across microservices."""
 
@@ -110,6 +122,20 @@ class OrchestrationEngine:
         # message is generated from the user name; otherwise the default
         # ORCHESTRATOR_SYSTEM_PROMPT is used.
         self._user_name: str | None = None
+
+        # Per-user, per-field approval cache. After a user approves
+        # get_field_value for a specific (document_id, version, field),
+        # subsequent calls for the same key within TTL skip the gate.
+        # Default TTL is 2 hours; override with
+        # CHITRAGUPTA_FIELD_APPROVAL_TTL_SECONDS env var.
+        self._field_approval_ttl_seconds = int(
+            os.getenv("CHITRAGUPTA_FIELD_APPROVAL_TTL_SECONDS", "7200")
+        )
+        # cache_key -> expires_at_monotonic
+        self._field_approvals: dict[str, float] = {}
+        # user_id cache (set via set_user_id). Used as the first segment
+        # of every cache key so approvals are scoped per user.
+        self._user_id: str | None = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -168,11 +194,60 @@ class OrchestrationEngine:
         # Normal flow: plan → execute
         return self._plan_and_execute(session)
 
+    def set_user_id(self, user_id: str | None) -> None:
+        """Set the active user id for per-user approval scoping."""
+        self._user_id = user_id
+
+    def _field_approval_key(self, tool_name: str, arguments: dict) -> str | None:
+        """Build a cache key for per-tool, per-field approval reuse.
+
+        Only get_field_value is currently cached; other gated tools
+        always prompt. Returns None for non-cacheable tools.
+        """
+        if tool_name != "get_field_value":
+            return None
+        document_id = str(arguments.get("document_id", ""))
+        version = arguments.get("version", 1)
+        field = str(arguments.get("field", arguments.get("field_name", "")))
+        if not document_id or not field:
+            return None
+        user_segment = self._user_id or session_fallback_user_id(self._sessions)
+        return f"{user_segment}|{tool_name}|{document_id}|{version}|{field}"
+
+    def _field_approval_is_fresh(self, key: str) -> bool:
+        """True iff a recent approval exists for this cache key."""
+        expires_at = self._field_approvals.get(key)
+        if expires_at is None:
+            return False
+        if expires_at < time.monotonic():
+            del self._field_approvals[key]
+            return False
+        return True
+
+    def _record_field_approval(self, key: str) -> None:
+        """Cache a fresh approval for this key, expiring after TTL."""
+        self._field_approvals[key] = time.monotonic() + self._field_approval_ttl_seconds
+        logger.info(
+            "Field approval cached: key=%s ttl=%ds",
+            key, self._field_approval_ttl_seconds,
+        )
+
     def handle_confirmation(
         self, session_id: str, request_id: str, approved: bool
     ) -> OrchestratorResponse:
         """Handle user's confirmation response."""
         self._confirmations.respond(request_id, approved)
+
+        # Cache per-field approvals so the user is not re-prompted for the
+        # same field within TTL (default 2 hours).
+        if approved:
+            confirmation = self._confirmations.get(request_id)
+            if confirmation is not None:
+                cache_key = self._field_approval_key(
+                    confirmation.tool_name, confirmation.tool_args
+                )
+                if cache_key is not None:
+                    self._record_field_approval(cache_key)
 
         session = self._sessions.get(session_id)
         if session is None:
@@ -382,28 +457,39 @@ class OrchestrationEngine:
             )
 
             if confirm_type:
-                # Check if already confirmed via pending store
-                existing = self._confirmations.get_by_tool_call(tool_call.call_id)
-                if existing is None or not existing.responded:
-                    # Need confirmation — create request and pause
-                    confirmation = ConfirmationRequest(
-                        session_id=session.session_id,
-                        confirmation_type=confirm_type,
-                        tool_name=tool_call.tool_name,
-                        tool_args={**tool_call.arguments, "call_id": tool_call.call_id},
-                        message=self._confirmation_message(
-                            confirm_type, tool_call.tool_name, tool_call.arguments
-                        ),
+                # Per-field approval cache: skip the gate if the user has
+                # already approved this exact (tool, document, field)
+                # within the TTL window. Lets "show me my aadhaar
+                # number" work without re-prompting on the next ask.
+                cache_key = self._field_approval_key(tool_call.tool_name, tool_call.arguments)
+                if cache_key is not None and self._field_approval_is_fresh(cache_key):
+                    logger.info(
+                        "Field approval cache hit: key=%s; skipping confirmation gate",
+                        cache_key,
                     )
-                    self._confirmations.save(confirmation)
-                    self._sessions.save(session)
+                else:
+                    # Check if already confirmed via pending store
+                    existing = self._confirmations.get_by_tool_call(tool_call.call_id)
+                    if existing is None or not existing.responded:
+                        # Need confirmation — create request and pause
+                        confirmation = ConfirmationRequest(
+                            session_id=session.session_id,
+                            confirmation_type=confirm_type,
+                            tool_name=tool_call.tool_name,
+                            tool_args={**tool_call.arguments, "call_id": tool_call.call_id},
+                            message=self._confirmation_message(
+                                confirm_type, tool_call.tool_name, tool_call.arguments
+                            ),
+                        )
+                        self._confirmations.save(confirmation)
+                        self._sessions.save(session)
 
-                    return OrchestratorResponse(
-                        session_id=session.session_id,
-                        message=confirmation.message,
-                        confirmation_required=confirmation,
-                        tool_calls_made=tool_calls_made,
-                    )
+                        return OrchestratorResponse(
+                            session_id=session.session_id,
+                            message=confirmation.message,
+                            confirmation_required=confirmation,
+                            tool_calls_made=tool_calls_made,
+                        )
 
             # Execute the tool
             tool_call.status = ToolCallStatus.RUNNING

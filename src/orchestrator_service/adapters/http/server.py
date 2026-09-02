@@ -144,6 +144,7 @@ def create_app(
                     "request_id": response.confirmation_required.request_id,
                     "type": response.confirmation_required.confirmation_type.value,
                     "message": response.confirmation_required.message,
+                    "tool_args": response.confirmation_required.tool_args,
                 }
                 if response.confirmation_required
                 else None
@@ -159,9 +160,10 @@ def create_app(
         session_id = body.get("session_id", "")
         request_id = body.get("request_id", "")
         approved = body.get("approved", False)
+        correction = body.get("correction")
         if not session_id or not request_id:
             raise HTTPException(status_code=400, detail="session_id and request_id required")
-        response = engine.handle_confirmation(session_id, request_id, approved)
+        response = engine.handle_confirmation(session_id, request_id, approved, correction=correction)
         return {
             "session_id": response.session_id,
             "message": response.message,

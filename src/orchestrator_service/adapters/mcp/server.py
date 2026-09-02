@@ -85,6 +85,7 @@ class MCPServer:
                         "request_id": response.confirmation_required.request_id,
                         "type": response.confirmation_required.confirmation_type.value,
                         "message": response.confirmation_required.message,
+                        "tool_args": response.confirmation_required.tool_args,
                     }
                     if response.confirmation_required
                     else None
@@ -96,9 +97,10 @@ class MCPServer:
             session_id = args.get("session_id", "")
             request_id_conf = args.get("request_id", "")
             approved = args.get("approved", False)
+            correction = args.get("correction")
             if not session_id or not request_id_conf:
                 return self._error(request_id, -32602, "session_id and request_id required")
-            response = self._engine.handle_confirmation(session_id, request_id_conf, approved)
+            response = self._engine.handle_confirmation(session_id, request_id_conf, approved, correction=correction)
             return self._tool_result(request_id, {
                 "session_id": response.session_id,
                 "message": response.message,

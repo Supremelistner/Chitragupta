@@ -65,13 +65,14 @@ class FileConfirmationStore:
                 logger.warning("Skipping corrupt confirmation file: %s", f.name)
         return pending
 
-    def respond(self, request_id: str, approved: bool) -> None:
+    def respond(self, request_id: str, approved: bool, correction: str | None = None) -> None:
         req = self.get(request_id)
         if req is None:
             logger.warning("Confirmation request %s not found", request_id)
             return
         req.responded = True
         req.approved = approved
+        req.correction = correction
         # Overwrite the file with updated state
         path = self._path(request_id)
         data = self._serialize(req)
@@ -107,6 +108,7 @@ class FileConfirmationStore:
             "created_at": request.created_at.isoformat() if request.created_at else None,
             "responded": request.responded,
             "approved": request.approved,
+            "correction": getattr(request, "correction", None),
             "tool_call_id": getattr(request, "tool_call_id", None),
         }
 
@@ -124,6 +126,8 @@ class FileConfirmationStore:
             req.created_at = datetime.fromisoformat(data["created_at"])
         req.responded = data.get("responded", False)
         req.approved = data.get("approved", False)
+        if data.get("correction"):
+            req.correction = data["correction"]
         if data.get("tool_call_id"):
             req.tool_call_id = data["tool_call_id"]
         return req

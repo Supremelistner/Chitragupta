@@ -155,6 +155,21 @@ _TOOL_DEFINITIONS: dict[str, tuple[ServiceTarget, str, dict[str, Any], Confirmat
         },
         ConfirmationType.SENSITIVE_ACCESS,
     ),
+    "get_field_value": (
+        ServiceTarget.DOCUMENT,
+        "Look up a specific extracted field value (e.g. aadhaar_number, pan_number, date_of_birth) on a document version. Two-step protocol (policy §5, failures #1): the FIRST call returns status=requires_confirmation with a popup shown in the UI; the orchestrator pauses for the user to approve. After approval, call get_field_value again with the same document_id, version, field, AND confirm=true — this returns the actual value. ALWAYS prefer this over get_evidence for single-field lookups; use get_evidence only for free-form question answering over OCR text. Field names are fuzzy-matched: case-insensitive, common-suffix stripping (_card/_number), and small typo corrections are applied automatically; the response includes resolved_field showing the actual key used. The response also includes available_fields listing every extracted field name; surface those to the user when status is not_found so they can pick the right one.",
+        {
+            "type": "object",
+            "properties": {
+                "document_id": {"type": "string", "description": "Get this from search_documents or list_documents results"},
+                "version": {"type": "integer", "description": "Get this from search_documents or list_documents results"},
+                "field": {"type": "string", "description": "Field name to look up, e.g. 'aadhaar_number', 'pan_number', 'date_of_birth'"},
+                "confirm": {"type": "boolean", "description": "Pass true on the SECOND call after the user approves. Defaults to false (first call returns requires_confirmation).", "default": False},
+            },
+            "required": ["document_id", "version", "field"],
+        },
+        ConfirmationType.SENSITIVE_ACCESS,
+    ),
     # ── Model Service ─────────────────────────────────────────────────
     "classify_document": (
         ServiceTarget.MODEL,
@@ -404,6 +419,7 @@ LLM_VISIBLE_TOOLS = {
     "search_document_content",
     "get_document_metadata",
     "get_document_description",
+    "get_field_value",
     "get_evidence",
     "classify_document",
     "verify_ocr",

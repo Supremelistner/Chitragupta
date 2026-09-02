@@ -546,6 +546,86 @@ class TestOrchestrationEngine(unittest.TestCase):
         )
         self.assertIn("OK", response2.message)
 
+    def test_deny_with_correction_records_correction_on_request(self):
+        """A plain deny + correction stores the correction on the"""
+        """confirmation request so the LLM can read it later."""
+        session = self.engine.create_session()
+        tool_call = {
+            "id": "tc_wrong",
+            "type": "function",
+            "function": {
+                "name": "get_field_value",
+                'arguments': '{"document_id": "doc-1", "version": 1, "field": "phone_number"}',
+            },
+        }
+        self.mock_llm.chat.return_value = LLMResponse(content="", tool_calls=[tool_call])
+        r1 = self.engine.process_message(session.session_id, "phone")
+        self.assertIsNotNone(r1.confirmation_required)
+        request_id = r1.confirmation_required.request_id
+        # User denies with correction
+        self.engine.handle_confirmation(session.session_id, request_id, approved=False, correction="pan_number")
+        loaded = self.confirmations.get(request_id)
+        self.assertIsNotNone(loaded)
+        self.assertTrue(loaded.responded)
+        self.assertFalse(loaded.approved)
+        self.assertEqual(loaded.correction, "pan_number")
+
+    def test_deny_with_correction_injects_feedback_into_session(self):
+        """A denied confirmation with a correction appends a SYSTEM"""
+        """message to the session so the LLM retries the right field."""
+        session = self.engine.create_session()
+        tool_call = {
+            "id": "tc_x",
+            "type": "function",
+            "function": {
+                "name": "get_field_value",
+                'arguments': '{"document_id": "doc-1", "version": 1, "field": "phone_number"}',
+            },
+        }
+        self.mock_llm.chat.return_value = LLMResponse(content="", tool_calls=[tool_call])
+        r1 = self.engine.process_message(session.session_id, "phone")
+        self.assertIsNotNone(r1.confirmation_required)
+        # The denial triggers _plan_and_execute again. The mock LLM
+        # needs to return something to keep the loop from re-asking.
+        self.mock_llm.chat.return_value = LLMResponse(content="OK")
+        self.engine.handle_confirmation(
+            session.session_id, r1.confirmation_required.request_id,
+            approved=False, correction="pan_number",
+        )
+        # The SYSTEM note pointing the LLM at the correct field should
+        # be somewhere in the session messages (it gets followed by
+        # an assistant turn produced by _plan_and_execute).
+        msgs = self.engine.get_session(session.session_id).messages
+        system_msgs = [m for m in msgs if m.role.value == "system"]
+        self.assertTrue(system_msgs, "expected a system message with the correction")
+        last_system = system_msgs[-1]
+        self.assertIn("phone_number", last_system.content)
+        self.assertIn("pan_number", last_system.content)
+
+    def test_deny_without_correction_uses_plain_user_message(self):
+        """A plain deny (no correction) falls back to the user-style"""
+        """No, do not do that. message."""
+        session = self.engine.create_session()
+        tool_call = {
+            "id": "tc_d",
+            "type": "function",
+            "function": {
+                "name": "get_document",
+                'arguments': '{"document_id": "doc-1", "version": 1}',
+            },
+        }
+        self.mock_llm.chat.return_value = LLMResponse(content="", tool_calls=[tool_call])
+        r1 = self.engine.process_message(session.session_id, "download")
+        self.assertIsNotNone(r1.confirmation_required)
+        self.mock_llm.chat.return_value = LLMResponse(content="OK")
+        self.engine.handle_confirmation(
+            session.session_id, r1.confirmation_required.request_id,
+            approved=False,
+        )
+        msgs = self.engine.get_session(session.session_id).messages
+        user_msgs = [m for m in msgs if m.role.value == "user" and "do that" in m.content]
+        self.assertTrue(user_msgs, "expected a user-style deny message")
+
     def test_field_approval_cache_skips_second_prompt(self):
         """After approving get_field_value for a specific (doc, ver, field),
         the second call for the same key should execute without prompting.

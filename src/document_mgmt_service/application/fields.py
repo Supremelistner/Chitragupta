@@ -26,6 +26,7 @@ from datetime import datetime
 from typing import Any
 
 from document_mgmt_service.domain.models import DocumentVersionRecord
+from shared.field_resolver import resolve_field_name
 from document_mgmt_service.domain.ports import PostgreSQLDocumentRepository
 
 logger = logging.getLogger("document_mgmt_service.fields")
@@ -69,6 +70,18 @@ class FieldValueResult:
 
     status: str
     field: str
+    # What the caller asked for, verbatim. May differ from `field`
+    # when the fuzzy resolver kicked in.
+    requested_field: str | None = None
+    # The canonical name we actually used for the lookup, after
+    # the resolver ran. None when not_found.
+    resolved_field: str | None = None
+    # How the resolver connected requested -> resolved. One of
+    # "exact", "case_insensitive", "substring", "stem_exact",
+    # "stem_substring", "stem_fuzzy", "fuzzy", "none".
+    match_type: str | None = None
+    # Resolver confidence, 0.0 - 1.0. 0.0 when no match.
+    match_confidence: float | None = None
     value: Any | None = None
     source: FieldValueSource | None = None
     suggestion: str | None = None
@@ -137,38 +150,57 @@ def get_field_value(
             f"Document {document_id} v{version} not found"
         )
     extracted = record.extracted_fields or {}
-    if field_name not in extracted:
+    available = sorted(extracted.keys())
+    # Run the resolver so typos / wrong-case / wrong-format names still
+    # hit the right field. The resolver is conservative: a miss is fine,
+    # the orchestrator denial-with-correction flow is the safety net.
+    resolution = resolve_field_name(field_name, available)
+    if resolution.resolved is None:
         return FieldValueResult(
             status="not_found",
             field=field_name,
+            requested_field=field_name,
+            resolved_field=None,
+            match_type="none",
+            match_confidence=0.0,
             suggestion=(
                 f"The field '{field_name}' was not extracted from this "
                 "document. Available fields: "
-                + (", ".join(sorted(extracted.keys())) or "none")
+                + (", ".join(available) or "none")
             ),
-            available_fields=sorted(extracted.keys()),
+            available_fields=available,
         )
+    # Resolver hit. Use the canonical name from here on.
+    resolved = resolution.resolved
     if not confirm:
         return FieldValueResult(
             status="requires_confirmation",
-            field=field_name,
-            source=_describe_source(record, field_name, page_number=None),
+            field=resolved,
+            requested_field=field_name,
+            resolved_field=resolved,
+            match_type=resolution.match_type,
+            match_confidence=resolution.confidence,
+            source=_describe_source(record, resolved, page_number=None),
             suggestion=(
-                f"Field '{field_name}' is cached for this document. "
+                f"Field '{resolved}' is cached for this document. "
                 "Confirm to see the value."
             ),
-            available_fields=sorted(extracted.keys()),
+            available_fields=available,
         )
     # Audit log \u2014 we deliberately don't log the value itself.
     logger.info(
         "Field value revealed: document=%s v=%d field=%s",
-        document_id, version, field_name,
+        document_id, version, resolved,
     )
     return FieldValueResult(
         status="ok",
-        field=field_name,
-        value=extracted[field_name],
-        source=_describe_source(record, field_name, page_number=None),
-        suggestion=_suggestion_for(field_name),
-        available_fields=sorted(extracted.keys()),
+        field=resolved,
+        requested_field=field_name,
+        resolved_field=resolved,
+        match_type=resolution.match_type,
+        match_confidence=resolution.confidence,
+        value=extracted[resolved],
+        source=_describe_source(record, resolved, page_number=None),
+        suggestion=_suggestion_for(resolved),
+        available_fields=available,
     )

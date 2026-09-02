@@ -233,10 +233,12 @@ class OrchestrationEngine:
         )
 
     def handle_confirmation(
-        self, session_id: str, request_id: str, approved: bool
+        self, session_id: str, request_id: str, approved: bool, correction: str | None = None
     ) -> OrchestratorResponse:
         """Handle user's confirmation response."""
-        self._confirmations.respond(request_id, approved)
+        # correction is the user-supplied corrected field name when they
+        # deny a confirmation because the LLM picked the wrong field.
+        self._confirmations.respond(request_id, approved, correction=correction)
 
         # Cache per-field approvals so the user is not re-prompted for the
         # same field within TTL (default 2 hours).
@@ -257,13 +259,31 @@ class OrchestrationEngine:
             )
 
         if not approved:
-            # User denied — continue without the gated tool call
-            session.messages.append(
-                ConversationMessage(
-                    role=MessageRole.USER,
-                    content="No, don't do that.",
+            # User denied. If they supplied a correction (e.g. they typed
+            # the right field name in the chat), record it as a system note
+            # so the LLM retries with the correct field.
+            pending = self._confirmations.get(request_id)
+            wrong_field = (pending.tool_args.get("field") if pending else None) or "(unknown)"
+            if correction:
+                session.messages.append(
+                    ConversationMessage(
+                        role=MessageRole.SYSTEM,
+                        content=(
+                            f"User denied the previous request for field '{wrong_field}' "
+                            f"and indicated the correct field is '{correction}'. "
+                            f"Re-call get_field_value with field='''{correction}''' so the user gets the right value."
+                        ),
+                    )
                 )
-            )
+            else:
+                # Plain denial, no correction. Tell the LLM the user said no.
+                session.messages.append(
+                    ConversationMessage(
+                        role=MessageRole.USER,
+                        content="No, don't do that.",
+                    )
+                )
+            self._sessions.save(session)
             return self._plan_and_execute(session)
 
         # Approved — find the step that was waiting and execute it

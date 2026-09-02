@@ -45,13 +45,14 @@ class InMemoryConfirmationStore:
             if rid in self._requests and not self._requests[rid].responded
         ]
 
-    def respond(self, request_id: str, approved: bool) -> None:
+    def respond(self, request_id: str, approved: bool, correction: str | None = None) -> None:
         req = self._requests.get(request_id)
         if req is None:
             logger.warning("Confirmation request %s not found", request_id)
             return
         req.responded = True
         req.approved = approved
+        req.correction = correction
         logger.info(
             "Confirmation %s: %s",
             request_id,

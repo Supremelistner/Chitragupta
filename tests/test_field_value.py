@@ -112,6 +112,47 @@ class GetFieldValueUnitTests(unittest.TestCase):
         self.assertEqual(result.status, "not_found")
         self.assertIn("not extracted", result.suggestion or "")
         self.assertIn("aadhaar_number", result.available_fields or [])
+    def test_resolver_case_insensitive_in_get_field_value(self):
+        """Aadhaar_Number (Title case) resolves to aadhaar_number."""
+        result = get_field_value(
+            self.repo, document_id="doc-1", version=1, field_name="Aadhaar_Number",
+        )
+        self.assertEqual(result.status, "requires_confirmation")
+        self.assertEqual(result.field, "aadhaar_number")
+        self.assertEqual(result.requested_field, "Aadhaar_Number")
+        self.assertEqual(result.resolved_field, "aadhaar_number")
+        self.assertEqual(result.match_type, "case_insensitive")
+
+    def test_resolver_stem_fuzzy_in_get_field_value(self):
+        """"adhar card" resolves to aadhaar_number via stem-stripping."""
+        result = get_field_value(
+            self.repo, document_id="doc-1", version=1, field_name="adhar card",
+        )
+        self.assertEqual(result.status, "requires_confirmation")
+        self.assertEqual(result.resolved_field, "aadhaar_number")
+        self.assertIn(result.match_type, ("stem_fuzzy", "stem_substring", "stem_exact"))
+
+    def test_resolver_with_confirm_returns_value_using_resolved_name(self):
+        """Even when the caller asked for a fuzzy-matching name,"""
+        """the returned value is keyed by the canonical name."""
+        result = get_field_value(
+            self.repo, document_id="doc-1", version=1,
+            field_name="adhar card", confirm=True,
+        )
+        self.assertEqual(result.status, "ok")
+        self.assertEqual(result.field, "aadhaar_number")
+        self.assertEqual(result.value, "1234 5678 9012")
+
+    def test_resolver_unrelated_field_returns_not_found(self):
+        """An unrelated field name (phone) with nothing in common"""
+        """returns not_found and lists available_fields."""
+        result = get_field_value(
+            self.repo, document_id="doc-1", version=1, field_name="phone",
+        )
+        self.assertEqual(result.status, "not_found")
+        self.assertEqual(result.match_type, "none")
+        self.assertIn("aadhaar_number", result.available_fields or [])
+
 
     def test_missing_document_raises(self):
         with self.assertRaises(FieldAccessError):

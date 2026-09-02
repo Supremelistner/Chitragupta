@@ -158,6 +158,9 @@ class ConfirmationRequest:
     tool_name: str = ""
     tool_args: dict[str, Any] = field(default_factory=dict)
     message: str = ""                  # Human-readable explanation
+    # When the user denies a confirmation, they can attach a correction
+    # (e.g. the wrong field name was picked, and the user types the right one).
+    correction: str | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     responded: bool = False
     approved: bool = False

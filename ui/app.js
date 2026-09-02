@@ -18,6 +18,7 @@ const chatTitleEl = document.getElementById('chat-title');
 const sessionStatusEl = document.getElementById('session-status');
 const confirmBar = document.getElementById('confirmation-bar');
 const confirmMsg = document.getElementById('confirmation-message');
+const confirmCorrection = document.getElementById('confirmation-correction');
 const sidebar = document.getElementById('sidebar');
 const fileInput = document.getElementById('file-input');
 const attachBtn = document.getElementById('btn-attach');
@@ -485,6 +486,7 @@ function removeTyping(id) {
 function showConfirmation(conf) {
     pendingConfirmation = conf;
     confirmMsg.textContent = conf.message || 'This action requires your approval.';
+    if (confirmCorrection) confirmCorrection.value = '';
     confirmBar.style.display = 'flex';
 }
 
@@ -495,18 +497,27 @@ async function respondConfirmation(approved) {
     const conf = pendingConfirmation;
     pendingConfirmation = null;
 
+    // On deny, grab the correction input (if any) so the LLM retries
+    // with the right field name on the next turn.
+    const correction = !approved && confirmCorrection
+        ? confirmCorrection.value.trim()
+        : '';
+    if (confirmCorrection) confirmCorrection.value = '';
+
     const typingId = showTyping();
     isLoading = true;
 
     try {
+        const payload = {
+            session_id: currentSessionId,
+            request_id: conf.request_id,
+            approved: approved,
+        };
+        if (correction) payload.correction = correction;
         const res = await fetch(API + '/api/confirm', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                session_id: currentSessionId,
-                request_id: conf.request_id,
-                approved: approved,
-            }),
+            body: JSON.stringify(payload),
         });
         const data = await res.json();
         removeTyping(typingId);

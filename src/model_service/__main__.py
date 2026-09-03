@@ -28,6 +28,38 @@ def _build_providers(config: ModelServiceConfig) -> dict[str, HuggingFaceProvide
     """Build provider adapters from config. Add new providers here."""
     providers = {}
 
+    # Gemini is selected when MODEL_SERVICE_PROVIDER=gemini (and GEMINI_API_KEY
+    # is set). It is the strictest switch: if you ask for Gemini, you get
+    # Gemini. Falls back to Groq only if explicitly configured.
+    if config.active_provider == "gemini" and config.gemini_api_key:
+        from model_service.infrastructure.gemini_provider import GeminiProviderAdapter
+        providers["huggingface"] = GeminiProviderAdapter(
+            api_key=config.gemini_api_key,
+            model_id=config.gemini_model_id,
+            tts_model_id=config.gemini_tts_model_id,
+            tts_voice=config.gemini_tts_voice,
+            timeout_seconds=config.request_timeout_seconds,
+            temperature=config.default_temperature,
+            max_tokens=config.default_max_tokens,
+        )
+        print(f"  Primary: Gemini ({config.gemini_model_id}) + TTS ({config.gemini_tts_model_id})")
+
+        # Optional: wrap with Groq fallback for Gemini failures.
+        if config.fallback_provider == "groq" and config.groq_api_key:
+            from model_service.infrastructure.groq_provider import GroqProviderAdapter
+            from model_service.infrastructure.fallback_provider import FallbackProvider
+            groq = GroqProviderAdapter(
+                api_key=config.groq_api_key,
+                model_id=config.groq_model_id,
+                timeout_seconds=config.request_timeout_seconds,
+                temperature=config.default_temperature,
+                max_tokens=config.default_max_tokens,
+            )
+            primary = providers["huggingface"]
+            providers["huggingface"] = FallbackProvider(primary=primary, fallback=groq)
+            print(f"  Fallback: Groq ({config.groq_model_id}) -- activates on Gemini errors / timeouts / 4xx/5xx")
+        return providers
+
     # If HF_TOKEN is empty AND Groq is configured as fallback, use Groq as the sole
     # primary. We alias the Groq adapter under the huggingface key so the repository
     # still tracks active_provider=huggingface (no caller change needed). When you

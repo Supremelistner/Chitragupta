@@ -45,7 +45,7 @@ class ModelServiceConfig:
     mcp_server_version: str
 
     # Provider selection
-    active_provider: str  # "huggingface", "fireworks", "deepinfra", "openai"
+    active_provider: str  # "huggingface", "fireworks", "deepinfra", "openai", "gemini"
     huggingface_token: str | None
     huggingface_model_id: str
     fireworks_api_key: str | None
@@ -54,6 +54,10 @@ class ModelServiceConfig:
     deepinfra_model_id: str
     openai_api_key: str | None
     openai_model_id: str
+    gemini_api_key: str | None
+    gemini_model_id: str
+    gemini_tts_model_id: str
+    gemini_tts_voice: str
 
     # Inference defaults
     max_image_size_bytes: int
@@ -88,6 +92,10 @@ class ModelServiceConfig:
             deepinfra_model_id=_env("MODEL_SERVICE_DEEPINFRA_MODEL", "Qwen/Qwen2.5-VL-3B-Instruct") or "Qwen/Qwen2.5-VL-3B-Instruct",
             openai_api_key=_env("OPENAI_API_KEY"),
             openai_model_id=_env("MODEL_SERVICE_OPENAI_MODEL", "gpt-4o-mini") or "gpt-4o-mini",
+            gemini_api_key=_env("GEMINI_API_KEY"),
+            gemini_model_id=_env("GEMINI_MODEL", "gemini-2.5-flash-lite") or "gemini-2.5-flash-lite",
+            gemini_tts_model_id=_env("GEMINI_TTS_MODEL", "gemini-2.5-flash-preview-tts") or "gemini-2.5-flash-preview-tts",
+            gemini_tts_voice=_env("GEMINI_TTS_VOICE", "Kore") or "Kore",
             max_image_size_bytes=_env_int("MODEL_SERVICE_MAX_IMAGE_BYTES", 10 * 1024 * 1024),
             default_temperature=_env_float("MODEL_SERVICE_TEMPERATURE", 0.1),
             default_max_tokens=_env_int("MODEL_SERVICE_MAX_TOKENS", 2048),

@@ -18,6 +18,7 @@ class ModelProviderType(str, Enum):
     FIREWORKS = "fireworks"
     DEEPINFRA = "deepinfra"
     OPENAI = "openai"
+    GEMINI = "gemini"
     LOCAL = "local"
 
 
@@ -31,6 +32,7 @@ class InferenceTaskType(str, Enum):
     PRIVACY_CLASSIFICATION = "privacy_classification"
     CUSTOM = "custom"
     TEMPLATE_FROM_WEB = "template_from_web"
+    AUDIO_SYNTHESIS = "audio_synthesis"
 
 
 @dataclass(frozen=True, slots=True)

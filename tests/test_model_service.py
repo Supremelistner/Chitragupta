@@ -173,9 +173,15 @@ class TestHuggingFaceAdapter(unittest.TestCase):
         self.assertTrue(health.healthy)
 
     def test_system_prompts_not_empty(self) -> None:
-        """Prompts should be populated with task-specific instructions."""
+        """Prompts should be populated with task-specific instructions.
+
+        AUDIO_SYNTHESIS is skipped: TTS doesn't use a system prompt; the
+        `text` field IS the content to speak.
+        """
         adapter = HuggingFaceProviderAdapter(model_id="test")
         for task in InferenceTaskType:
+            if task == InferenceTaskType.AUDIO_SYNTHESIS:
+                continue
             prompt = adapter._system_prompt(task)
             self.assertGreater(len(prompt), 50, f"Prompt for {task.value} should be populated")
 
@@ -371,6 +377,284 @@ class TestDocumentMCPPolicySurface(unittest.TestCase):
             }},
         })
         self.assertIn("error", response)
+
+
+# ---------------------------------------------------------------------------
+# Gemini provider tests
+# ---------------------------------------------------------------------------
+
+class _FakeGeminiBlob:
+    def __init__(self, data: bytes, mime_type: str) -> None:
+        self.data = data
+        self.mime_type = mime_type
+
+
+class _FakeGeminiPart:
+    def __init__(self, data: bytes, mime_type: str) -> None:
+        self.inline_data = _FakeGeminiBlob(data, mime_type)
+
+
+class _FakeGeminiContent:
+    def __init__(self, parts) -> None:
+        self.parts = parts
+
+
+class _FakeGeminiCandidate:
+    def __init__(self, parts) -> None:
+        self.content = _FakeGeminiContent(parts)
+
+
+class _FakeGeminiUsage:
+    def __init__(self, prompt: int = 5, candidates: int = 7) -> None:
+        self.prompt_token_count = prompt
+        self.candidates_token_count = candidates
+
+
+class _FakeGeminiTTSResponse:
+    """Fake response for `client.models.generate_content` on the TTS model."""
+
+    def __init__(self, pcm: bytes | None = None) -> None:
+        pcm = pcm if pcm is not None else b"\x00\x01" * 64
+        self.candidates = [
+            _FakeGeminiCandidate(
+                [_FakeGeminiPart(pcm, "audio/L16;rate=24000")]
+            )
+        ]
+        self.usage_metadata = _FakeGeminiUsage(prompt=2, candidates=0)
+
+
+class _FakeGeminiTextResponse:
+    def __init__(self, text: str = "OK") -> None:
+        self.text = text
+        self.usage_metadata = _FakeGeminiUsage()
+        self.candidates = []
+
+
+class _FakeGeminiModels:
+    """Minimal stand-in for `client.models` for both chat and TTS."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def generate_content(self, *, model, contents, config):
+        self.calls.append({"model": model, "contents": contents, "config": config})
+        if "tts" in (model or "").lower():
+            return _FakeGeminiTTSResponse()
+        return _FakeGeminiTextResponse("OK")
+
+    def list(self):
+        return []
+
+
+class _FakeGeminiClient:
+    def __init__(self, **kwargs) -> None:
+        self.models = _FakeGeminiModels()
+        self.init_kwargs = kwargs
+
+
+# A minimal stand-in for google.genai.types so the adapter can import it
+# without the real google-genai package installed. We register it on
+# sys.modules at test time.
+class _FakeGenaiTypes:
+    class GenerateContentConfig:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class SpeechConfig:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class VoiceConfig:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class PrebuiltVoiceConfig:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class Part:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class Blob:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+
+def _ensure_genai_stub() -> None:
+    """Inject a fake `google.genai.types` module so tests run without
+    the real google-genai package installed."""
+    import sys
+    import types as _types
+
+    if "google.genai" in sys.modules and hasattr(
+        sys.modules["google.genai"], "types"
+    ):
+        return
+    google_pkg = sys.modules.get("google")
+    if google_pkg is None:
+        google_pkg = _types.ModuleType("google")
+        sys.modules["google"] = google_pkg
+    genai_pkg = _types.ModuleType("google.genai")
+    genai_pkg.types = _FakeGenaiTypes
+    sys.modules["google.genai"] = genai_pkg
+    google_pkg.genai = genai_pkg
+
+
+_ensure_genai_stub()
+
+
+class TestGeminiProviderAdapter(unittest.TestCase):
+    """Tests for the Gemini provider. No network. The google.genai SDK is
+    faked via a direct _client swap on the adapter."""
+
+    def _make_adapter(self, **overrides):
+        from model_service.infrastructure.gemini_provider import GeminiProviderAdapter
+        defaults = dict(
+            api_key="test-key",
+            model_id="gemini-2.5-flash-lite",
+            tts_model_id="gemini-2.5-flash-preview-tts",
+            tts_voice="Kore",
+        )
+        defaults.update(overrides)
+        adapter = GeminiProviderAdapter(**defaults)
+        adapter._client = _FakeGeminiClient()
+        return adapter
+
+    def test_provider_type_is_gemini(self) -> None:
+        adapter = self._make_adapter()
+        self.assertEqual(adapter.provider_type.value, "gemini")
+
+    def test_chat_completion_calls_generate_content(self) -> None:
+        from model_service.domain.models import InferenceRequest, InferenceTaskType
+        adapter = self._make_adapter()
+        request = InferenceRequest(
+            task=InferenceTaskType.CUSTOM,
+            text="Hello",
+            prompt="Reply with a single word.",
+        )
+        result = adapter.infer(request)
+        self.assertFalse(result.output.startswith("ERROR:"))
+        self.assertEqual(result.output, "OK")
+        self.assertEqual(
+            adapter._client.models.calls[0]["model"], "gemini-2.5-flash-lite"
+        )
+        self.assertIn(
+            "Reply with a single word.",
+            adapter._client.models.calls[0]["contents"],
+        )
+
+    def test_tts_returns_base64_wav(self) -> None:
+        from model_service.domain.models import InferenceRequest, InferenceTaskType
+        import base64
+        adapter = self._make_adapter()
+        request = InferenceRequest(
+            task=InferenceTaskType.AUDIO_SYNTHESIS,
+            text="hello",
+            parameters={"language": "hi-IN", "voice": "Kore"},
+        )
+        result = adapter.infer(request)
+        self.assertFalse(result.output.startswith("ERROR:"))
+        wav = base64.b64decode(result.output)
+        self.assertEqual(wav[:4], b"RIFF")
+        self.assertEqual(wav[8:12], b"WAVE")
+        self.assertEqual(result.metadata.get("language"), "hi-IN")
+        self.assertEqual(result.metadata.get("voice"), "Kore")
+        self.assertEqual(result.metadata.get("mime_type"), "audio/wav")
+
+    def test_tts_unknown_language_falls_back_to_en_us(self) -> None:
+        from model_service.domain.models import InferenceRequest, InferenceTaskType
+        adapter = self._make_adapter()
+        request = InferenceRequest(
+            task=InferenceTaskType.AUDIO_SYNTHESIS,
+            text="hi",
+            parameters={"language": "klingon-KL"},
+        )
+        result = adapter.infer(request)
+        self.assertFalse(result.output.startswith("ERROR:"))
+        self.assertEqual(result.metadata.get("language"), "en-US")
+
+    def test_tts_short_code_resolved(self) -> None:
+        from model_service.domain.models import InferenceRequest, InferenceTaskType
+        adapter = self._make_adapter()
+        request = InferenceRequest(
+            task=InferenceTaskType.AUDIO_SYNTHESIS,
+            text="hi",
+            parameters={"language": "ta"},
+        )
+        result = adapter.infer(request)
+        self.assertEqual(result.metadata.get("language"), "ta-IN")
+
+    def test_tts_invalid_voice_falls_back_to_default(self) -> None:
+        from model_service.domain.models import InferenceRequest, InferenceTaskType
+        adapter = self._make_adapter(tts_voice="Kore")
+        request = InferenceRequest(
+            task=InferenceTaskType.AUDIO_SYNTHESIS,
+            text="hi",
+            parameters={"voice": "NotAGeminiVoice"},
+        )
+        result = adapter.infer(request)
+        self.assertEqual(result.metadata.get("voice"), "Kore")
+
+    def test_tts_empty_text_returns_error_envelope(self) -> None:
+        from model_service.domain.models import InferenceRequest, InferenceTaskType
+        adapter = self._make_adapter()
+        request = InferenceRequest(task=InferenceTaskType.AUDIO_SYNTHESIS, text="")
+        result = adapter.infer(request)
+        self.assertTrue(result.output.startswith("ERROR:"))
+
+    def test_list_models_reports_chat_and_tts(self) -> None:
+        adapter = self._make_adapter()
+        models = adapter.list_models()
+        ids = {m.model_id for m in models}
+        self.assertIn("gemini-2.5-flash-lite", ids)
+        self.assertIn("gemini-2.5-flash-preview-tts", ids)
+        tts = next(m for m in models if "tts" in m.model_id)
+        self.assertTrue(tts.supports_text)
+        self.assertFalse(tts.supports_vision)
+
+    def test_health_pings_models_list(self) -> None:
+        adapter = self._make_adapter()
+        h = adapter.health()
+        self.assertTrue(h.healthy)
+
+
+class TestGeminiProviderInFactory(unittest.TestCase):
+    """`_build_providers` must produce a Gemini adapter when configured."""
+
+    def _config(self, **overrides):
+        from model_service.config import ModelServiceConfig
+        defaults = dict(
+            app_name="t", environment="t", log_level="INFO",
+            http_host="127.0.0.1", http_port=8081,
+            mcp_server_name="t", mcp_server_version="0",
+            active_provider="gemini",
+            huggingface_token=None,
+            huggingface_model_id="Qwen/Qwen2.5-VL-72B-Instruct",
+            fireworks_api_key=None, fireworks_model_id="",
+            deepinfra_api_key=None, deepinfra_model_id="",
+            openai_api_key=None, openai_model_id="gpt-4o-mini",
+            gemini_api_key="test-key",
+            gemini_model_id="gemini-2.5-flash-lite",
+            gemini_tts_model_id="gemini-2.5-flash-preview-tts",
+            gemini_tts_voice="Kore",
+            max_image_size_bytes=10 * 1024 * 1024,
+            default_temperature=0.1,
+            default_max_tokens=2048,
+            request_timeout_seconds=30,
+            groq_api_key=None, groq_model_id="qwen/qwen3.6-27b",
+            fallback_provider=None,
+            file_storage_root=None,
+        )
+        defaults.update(overrides)
+        return ModelServiceConfig(**defaults)
+
+    def test_gemini_is_built_when_configured(self) -> None:
+        from model_service.__main__ import _build_providers
+        providers = _build_providers(self._config())
+        self.assertIn("huggingface", providers)
+        from model_service.infrastructure.gemini_provider import GeminiProviderAdapter
+        self.assertIsInstance(providers["huggingface"], GeminiProviderAdapter)
 
 
 if __name__ == "__main__":

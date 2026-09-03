@@ -52,6 +52,8 @@ class _ModelRequestHandler(BaseHTTPRequestHandler):
                 self._handle_infer(InferenceTaskType.METADATA_EXTRACTION, payload)
             elif path == "/infer/summarize":
                 self._handle_infer(InferenceTaskType.CONTENT_SUMMARIZATION, payload)
+            elif path == "/infer/synthesize-audio":
+                self._handle_synthesize_audio(payload)
             elif path == "/providers/switch":
                 provider = payload.get("provider", "")
                 if not provider:
@@ -95,6 +97,65 @@ class _ModelRequestHandler(BaseHTTPRequestHandler):
             "confidence": result.confidence,
             "latency_ms": result.latency_ms,
             "token_usage": result.token_usage,
+            "request_id": result.request_id,
+        })
+
+    def _handle_synthesize_audio(self, payload: dict[str, Any]) -> None:
+        """POST /infer/synthesize-audio — text-to-speech via the active provider.
+
+        Request body:
+          {
+            "text":   "<required, what to speak>",
+            "language": "<BCP-47, e.g. hi-IN, en-US, default en-US>",
+            "voice":  "<optional voice name, e.g. Kore>",
+            "request_id": "<optional echo>"
+          }
+
+        Response: JSON envelope with `output` as base64-encoded WAV bytes
+        and `metadata` carrying the MIME type / language / voice used.
+        """
+        text = (payload.get("text") or "").strip()
+        if not text:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "text is required"})
+            return
+
+        # Build parameters dict from the well-known TTS fields.
+        parameters: dict[str, Any] = {}
+        if payload.get("language"):
+            parameters["language"] = payload["language"]
+        if payload.get("voice"):
+            parameters["voice"] = payload["voice"]
+        if payload.get("model_id"):
+            parameters["model_id"] = payload["model_id"]
+        # Any extra param_* keys flow through.
+        for k, v in payload.items():
+            if k.startswith("param_"):
+                parameters[k[len("param_"):]] = v
+
+        request = InferenceRequest(
+            task=InferenceTaskType.AUDIO_SYNTHESIS,
+            text=text,
+            parameters=parameters,
+            request_id=payload.get("request_id"),
+        )
+        result = self.inference_service.infer(request)
+        if result.output.startswith("ERROR:"):
+            self._send_json(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                {
+                    "error": result.output[len("ERROR:"):].strip(),
+                    "provider": result.provider.value,
+                    "model_id": result.model_id,
+                },
+            )
+            return
+        self._send_json(HTTPStatus.OK, {
+            "task": result.task.value,
+            "provider": result.provider.value,
+            "model_id": result.model_id,
+            "output": result.output,  # base64-encoded WAV
+            "metadata": result.metadata or {},
+            "latency_ms": result.latency_ms,
             "request_id": result.request_id,
         })
 

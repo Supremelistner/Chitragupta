@@ -87,6 +87,8 @@ class MCPServer:
             return self._tool_result(request_id, self._extract_metadata(arguments))
         if name == "summarize_content":
             return self._tool_result(request_id, self._summarize_content(arguments))
+        if name == "synthesize_speech":
+            return self._tool_result(request_id, self._synthesize_speech(arguments))
         if name == "list_providers":
             return self._tool_result(request_id, {"providers": self._inference.list_providers()})
         if name == "get_active_provider":
@@ -150,6 +152,24 @@ class MCPServer:
         result = self._inference.infer(request)
         return self._result_payload(result)
 
+    def _synthesize_speech(self, args: dict[str, Any]) -> dict[str, Any]:
+        """MCP tool wrapper for the /infer/synthesize-audio endpoint."""
+        text = (args.get("text") or "").strip()
+        if not text:
+            raise ValueError("text is required")
+        parameters: dict[str, Any] = {}
+        for key in ("language", "voice", "model_id"):
+            if args.get(key):
+                parameters[key] = args[key]
+        request = InferenceRequest(
+            task=InferenceTaskType.AUDIO_SYNTHESIS,
+            text=text,
+            parameters=parameters,
+            request_id=args.get("request_id"),
+        )
+        result = self._inference.infer(request)
+        return self._result_payload(result)
+
     def _extract_image(self, args: dict[str, Any]) -> tuple[bytes | None, str | None]:
         """Extract image bytes and MIME type from arguments."""
         image_b64 = args.get("image_base64")
@@ -176,6 +196,7 @@ class MCPServer:
             "latency_ms": result.latency_ms,
             "token_usage": result.token_usage,
             "request_id": result.request_id,
+            "metadata": getattr(result, "metadata", None) or {},
         }
 
     # -- Tool specs --
@@ -235,6 +256,38 @@ class MCPServer:
                     "properties": {
                         "text": {"type": "string", "description": "Text to summarize"},
                         "prompt": {"type": "string"},
+                    },
+                    "required": ["text"],
+                    "additionalProperties": False,
+                },
+            ),
+            self._tool_spec(
+                "synthesize_speech",
+                "Convert text to speech audio. Returns base64-encoded WAV. "
+                "Supports multiple languages (e.g. en-US, hi-IN, ta-IN, te-IN, "
+                "bn-IN, mr-IN, gu-IN, kn-IN, ml-IN, pa-IN). Used by the "
+                "elderly-friendly UI voice output feature.",
+                {
+                    "type": "object",
+                    "properties": {
+                        "text": {
+                            "type": "string",
+                            "description": "Text to speak",
+                        },
+                        "language": {
+                            "type": "string",
+                            "description": "BCP-47 language code, e.g. hi-IN. Default en-US.",
+                            "default": "en-US",
+                        },
+                        "voice": {
+                            "type": "string",
+                            "description": "Voice name (Kore, Puck, Charon, Zephyr, "
+                            "Fenrir, Leda, Orus, Aoede). Default Kore.",
+                        },
+                        "model_id": {
+                            "type": "string",
+                            "description": "Override the TTS model id (e.g. gemini-2.5-pro-preview-tts).",
+                        },
                     },
                     "required": ["text"],
                     "additionalProperties": False,

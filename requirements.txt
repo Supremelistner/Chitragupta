@@ -24,8 +24,13 @@ psycopg[binary]>=3.1.0
 # Symmetric encryption for Qdrant payload (Fernet)
 cryptography>=42.0.0
 
-# Model providers — vision-LLM inference with HuggingFace primary and
-# Groq fallback. Both are lazy-imported by the model service so they
-# must be present at install time or first-request import will fail.
+# Model providers — vision-LLM inference with HuggingFace primary,
+# Groq fallback, and optional Gemini primary. Each is lazy-imported by
+# the model service so it must be present at install time or
+# first-request import will fail.
 huggingface_hub>=0.24.0
 groq>=0.11.0
+# google-genai is the official Google Gemini SDK. Optional: only required
+# when MODEL_SERVICE_PROVIDER=gemini (or when the orchestrator's Gemini LLM
+# client is used).
+google-genai>=1.0.0

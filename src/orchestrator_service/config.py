@@ -59,6 +59,12 @@ class OrchestratorConfig:
     groq_model_id: str
     fallback_provider: str | None
 
+    # Gemini (primary LLM)
+    gemini_api_key: str | None
+    gemini_llm_model_id: str
+    gemini_tts_model_id: str
+    gemini_tts_voice: str
+
     @classmethod
     def from_env(cls) -> OrchestratorConfig:
         return cls(
@@ -83,6 +89,10 @@ class OrchestratorConfig:
             groq_api_key=_env("GROQ_API_KEY"),
             groq_model_id=_env("GROQ_LLM_MODEL", "qwen/qwen3.8-27b") or "qwen/qwen3.8-27b",
             fallback_provider=_env("ORCHESTRATOR_FALLBACK_PROVIDER"),
+            gemini_api_key=_env("GEMINI_API_KEY"),
+            gemini_llm_model_id=_env("GEMINI_LLM_MODEL", "gemini-2.5-flash-lite") or "gemini-2.5-flash-lite",
+            gemini_tts_model_id=_env("GEMINI_TTS_MODEL", "gemini-2.5-flash-preview-tts") or "gemini-2.5-flash-preview-tts",
+            gemini_tts_voice=_env("GEMINI_TTS_VOICE", "Kore") or "Kore",
         )
 
 

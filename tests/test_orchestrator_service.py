@@ -814,6 +814,250 @@ class TestLLMMessageBuilding(unittest.TestCase):
 # Domain Model Tests
 # =========================================================================
 
+class _FakeGenaiTypesGemini:
+    """Stub for google.genai.types used by the Gemini LLM provider under
+    test. The real SDK isn't installed in CI; the provider does lazy
+    `from google.genai import types` imports inside the methods that
+    exercise the schema conversion or the model call. The fake types just
+    store whatever kwargs they're given so the test fakes can introspect
+    them later."""
+
+    class Type:
+        STRING = "STRING"
+        NUMBER = "NUMBER"
+        INTEGER = "INTEGER"
+        BOOLEAN = "BOOLEAN"
+        ARRAY = "ARRAY"
+        OBJECT = "OBJECT"
+
+    class Schema:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            for k, v in kwargs.items():
+                setattr(self, k, v)
+
+    class FunctionDeclaration:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            for k, v in kwargs.items():
+                setattr(self, k, v)
+
+    class Tool:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            for k, v in kwargs.items():
+                setattr(self, k, v)
+
+    class Part:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            for k, v in kwargs.items():
+                setattr(self, k, v)
+
+    class Content:
+        def __init__(self, *, role, parts):
+            self.role = role
+            self.parts = parts
+
+    class FunctionCall:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            for k, v in kwargs.items():
+                setattr(self, k, v)
+
+    class FunctionResponse:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            for k, v in kwargs.items():
+                setattr(self, k, v)
+
+    class GenerateContentConfig:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            for k, v in kwargs.items():
+                setattr(self, k, v)
+
+
+def _ensure_genai_stub() -> None:
+    """Inject a fake `google.genai.types` module so the orchestrator's
+    Gemini LLM provider tests run without the real google-genai package."""
+    import sys
+    import types as _types
+
+    if "google.genai" in sys.modules and hasattr(
+        sys.modules["google.genai"], "types"
+    ):
+        return
+    google_pkg = sys.modules.get("google")
+    if google_pkg is None:
+        google_pkg = _types.ModuleType("google")
+        sys.modules["google"] = google_pkg
+    genai_pkg = _types.ModuleType("google.genai")
+    genai_pkg.types = _FakeGenaiTypesGemini
+    sys.modules["google.genai"] = genai_pkg
+    google_pkg.genai = genai_pkg
+
+
+_ensure_genai_stub()
+
+
+class TestGeminiLLMProvider(unittest.TestCase):
+    """Tests for the Gemini LLM provider. No network. The google.genai SDK
+    is faked via a direct _client swap on the adapter."""
+
+    def _make_provider(self, **overrides):
+        from orchestrator_service.infrastructure.gemini_llm_provider import (
+            GeminiLLMProvider,
+        )
+        defaults = dict(api_key="test-key", model_id="gemini-2.5-flash-lite")
+        defaults.update(overrides)
+        return GeminiLLMProvider(**defaults)
+
+    def _install_fake_client(self, provider, fake_models):
+        class _Client:
+            pass
+        c = _Client()
+        c.models = fake_models
+        provider._client = c
+        return c
+
+    def test_provider_imports(self) -> None:
+        provider = self._make_provider()
+        self.assertEqual(provider._model_id, "gemini-2.5-flash-lite")
+
+    def test_chat_text_only_response(self) -> None:
+        class _Part:
+            def __init__(self, text):
+                self.text = text
+
+        class _Content:
+            def __init__(self, parts):
+                self.parts = parts
+
+        class _Candidate:
+            def __init__(self, parts):
+                self.content = _Content(parts)
+
+        class _Usage:
+            prompt_token_count = 10
+            candidates_token_count = 4
+
+        class _Response:
+            candidates = [_Candidate([_Part("hi back")])]
+            usage_metadata = _Usage()
+            model = "gemini-2.5-flash-lite"
+
+        class _Models:
+            def __init__(self):
+                self.last = None
+
+            def generate_content(self, *, model, contents, config):
+                self.last = {"model": model, "contents": contents, "config": config}
+                return _Response()
+
+        fake = _Models()
+        provider = self._make_provider()
+        self._install_fake_client(provider, fake)
+
+        messages = [
+            ConversationMessage(role=MessageRole.SYSTEM, content="be terse"),
+            ConversationMessage(role=MessageRole.USER, content="hello"),
+        ]
+        resp = provider.chat(messages)
+        self.assertEqual(resp.content, "hi back")
+        self.assertEqual(resp.tool_calls, [])
+        self.assertEqual(resp.model, "gemini-2.5-flash-lite")
+        self.assertEqual(resp.token_usage, {"input": 10, "output": 4})
+        self.assertEqual(fake.last["config"].system_instruction, "be terse")
+        user_contents = [c for c in fake.last["contents"] if c.role == "user"]
+        self.assertTrue(user_contents)
+
+    def test_chat_with_function_call(self) -> None:
+        class _Part:
+            def __init__(self, fc=None, text=None):
+                self.text = text
+                self.function_call = fc
+
+        class _Content:
+            def __init__(self, parts):
+                self.parts = parts
+
+        class _Candidate:
+            def __init__(self, parts):
+                self.content = _Content(parts)
+
+        class _FC:
+            name = "search_documents"
+            args = {"query": "aadhaar"}
+
+        class _Response:
+            candidates = [_Candidate([_Part(fc=_FC())])]
+            usage_metadata = None
+            model = "gemini-2.5-flash-lite"
+
+        class _Models:
+            def generate_content(self, *, model, contents, config):
+                return _Response()
+
+        provider = self._make_provider()
+        self._install_fake_client(provider, _Models())
+
+        tools = [{
+            "type": "function",
+            "function": {
+                "name": "search_documents",
+                "description": "Search",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                },
+            },
+        }]
+        messages = [ConversationMessage(role=MessageRole.USER, content="find aadhaar")]
+        resp = provider.chat(messages, tools=tools)
+        self.assertEqual(len(resp.tool_calls), 1)
+        tc = resp.tool_calls[0]
+        self.assertEqual(tc["function"]["name"], "search_documents")
+        import json
+        self.assertEqual(json.loads(tc["function"]["arguments"]), {"query": "aadhaar"})
+        self.assertTrue(tc["id"].startswith("call_"))
+        self.assertEqual(tc["type"], "function")
+
+    def test_chat_without_tools_omits_tool_config(self) -> None:
+        captured = {}
+
+        class _Models:
+            def generate_content(self, *, model, contents, config):
+                captured["config"] = config
+                class _R:
+                    candidates = []
+                    usage_metadata = None
+                    model = "gemini-2.5-flash-lite"
+                return _R()
+
+        provider = self._make_provider()
+        self._install_fake_client(provider, _Models())
+        provider.chat([ConversationMessage(role=MessageRole.USER, content="hi")])
+        # The GenerateContentConfig only carries fields we actually set.
+        self.assertFalse(hasattr(captured["config"], "tools"))
+
+    def test_health_returns_status_dict(self) -> None:
+        class _Models:
+            def generate_content(self, *, model, contents, config):
+                class _R:
+                    candidates = []
+                    usage_metadata = None
+                    model = "gemini-2.5-flash-lite"
+                return _R()
+
+        provider = self._make_provider()
+        self._install_fake_client(provider, _Models())
+        h = provider.health()
+        self.assertEqual(h["status"], "healthy")
+        self.assertEqual(h["provider"], "gemini")
+
+
 class TestDomainModels(unittest.TestCase):
     """Test domain model defaults and values."""
 

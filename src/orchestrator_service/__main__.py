@@ -70,14 +70,29 @@ def main() -> None:
     }
     router = ServiceClientRouter(clients)
 
-    # LLM provider (primary: HF, fallback: Groq)
-    primary_llm = QwenLLMProvider(
-        token=config.hf_token or "",
-        model_id=config.llm_model_id,
-        timeout_seconds=config.llm_timeout_seconds,
-        temperature=config.llm_temperature,
-        max_tokens=config.llm_max_tokens,
-    )
+    # LLM provider selection. Three options:
+    #   1. GEMINI_API_KEY set -> Gemini as primary (free tier, generous RPD)
+    #   2. Otherwise -> Qwen via HuggingFace
+    # Either path can be wrapped in a Groq fallback if ORCHESTRATOR_FALLBACK_PROVIDER=groq
+    # and GROQ_API_KEY is set.
+    if config.gemini_api_key:
+        from orchestrator_service.infrastructure.gemini_llm_provider import GeminiLLMProvider
+        primary_llm = GeminiLLMProvider(
+            api_key=config.gemini_api_key,
+            model_id=config.gemini_llm_model_id,
+            timeout_seconds=config.llm_timeout_seconds,
+            temperature=config.llm_temperature,
+            max_tokens=config.llm_max_tokens,
+        )
+        logger.info("LLM primary: Gemini (%s)", config.gemini_llm_model_id)
+    else:
+        primary_llm = QwenLLMProvider(
+            token=config.hf_token or "",
+            model_id=config.llm_model_id,
+            timeout_seconds=config.llm_timeout_seconds,
+            temperature=config.llm_temperature,
+            max_tokens=config.llm_max_tokens,
+        )
 
     if config.fallback_provider == "groq" and config.groq_api_key:
         from orchestrator_service.infrastructure.groq_llm_provider import GroqLLMProvider
@@ -89,12 +104,13 @@ def main() -> None:
             temperature=config.llm_temperature,
             max_tokens=config.llm_max_tokens,
         )
-        if not config.hf_token:
-            # HF credits exhausted - route every chat call straight through
-            # Groq instead of wasting a 401 round-trip on the primary.
+        if not config.hf_token and not config.gemini_api_key:
+            # No primary LLM is configured — route every chat call straight
+            # through Groq instead of wasting a 401 round-trip on the primary.
             llm = groq_llm
             logger.info(
-                "LLM primary: Groq (%s) - HF_TOKEN empty, skipping primary HF",
+                "LLM primary: Groq (%s) - no primary configured, "
+                "using Groq as sole LLM",
                 config.groq_model_id,
             )
         else:

@@ -2,8 +2,15 @@ from __future__ import annotations
 
 import base64
 import cgi
+import hashlib
+import hmac
 import json
 import logging
+import os
+import secrets
+import time
+from dataclasses import asdict, is_dataclass
+from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -18,6 +25,10 @@ from document_mgmt_service.application.access import (
     ApprovalRequiredError,
     DocumentAccessService,
 )
+from document_mgmt_service.application.fields import (
+    FieldAccessError,
+    get_field_value,
+)
 from document_mgmt_service.domain.models import (
     DocumentIngestionRequest,
     DocumentPrivacyClassification,
@@ -25,6 +36,93 @@ from document_mgmt_service.domain.models import (
 
 
 _STATUS_PATH_RE = re.compile(r"^/documents/(?P<document_id>[^/]+)/versions/(?P<version>\d+)/status$")
+
+# ---------------------------------------------------------------------------
+# Confirmation-token machinery for the two-step get_field_value protocol.
+# ---------------------------------------------------------------------------
+_FIELD_CONFIRM_TTL_SECONDS = 300  # 5 minutes
+
+
+_FIELD_CONFIRM_KEY_CACHE: bytes | None = None
+
+
+def _get_field_confirm_key() -> bytes:
+    """Resolve the HMAC key for signing confirmation tokens."""
+    global _FIELD_CONFIRM_KEY_CACHE
+    if _FIELD_CONFIRM_KEY_CACHE is not None:
+        return _FIELD_CONFIRM_KEY_CACHE
+    raw = os.environ.get("CHITRAGUPTA_FIELD_CONFIRM_KEY")
+    if raw:
+        key = bytes.fromhex(raw) if len(raw) % 2 == 0 else raw.encode("utf-8")
+    else:
+        env = os.environ.get("CHITRAGUPTA_ENV", "").lower()
+        if env in {"prod", "production"}:
+            raise RuntimeError(
+                "CHITRAGUPTA_FIELD_CONFIRM_KEY must be set in production; "
+                "refusing to start with a per-process random key."
+            )
+        key = secrets.token_bytes(32)
+        logging.getLogger(__name__).warning(
+            "CHITRAGUPTA_FIELD_CONFIRM_KEY is not set; using a per-process "
+            "random key. Outstanding tokens will be invalidated on restart."
+        )
+    _FIELD_CONFIRM_KEY_CACHE = key
+    return key
+
+
+def _sign_field_confirm_token(
+    *, document_id: str, version: int, field_name: str, ttl: int
+) -> str:
+    """Build a base64url HMAC-signed confirmation token."""
+    expiry = int(time.time()) + ttl
+    nonce = secrets.token_hex(8)
+    payload = f"{expiry}:{nonce}:{document_id}:{version}:{field_name}"
+    sig = hmac.new(_get_field_confirm_key(), payload.encode("utf-8"),
+                   hashlib.sha256).hexdigest()
+    raw = f"{payload}:{sig}".encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _verify_field_confirm_token(
+    token: str, *, document_id: str, version: int, field_name: str
+) -> bool:
+    """Return True iff the token is valid for the given call."""
+    try:
+        padded = token + "=" * (-len(token) % 4)
+        raw = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
+    except (ValueError, UnicodeDecodeError, base64.binascii.Error):
+        return False
+    parts = raw.split(":")
+    if len(parts) != 6:
+        return False
+    expiry_str, nonce, tok_doc, tok_ver, tok_field, sig = parts
+    try:
+        expiry = int(expiry_str)
+        tok_version = int(tok_ver)
+    except ValueError:
+        return False
+    if expiry < int(time.time()):
+        return False
+    if tok_doc != document_id or tok_version != version or tok_field != field_name:
+        return False
+    payload = f"{expiry_str}:{nonce}:{tok_doc}:{tok_version}:{tok_field}"
+    expected = hmac.new(
+        _get_field_confirm_key(), payload.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(expected, sig)
+
+
+def _json_safe(obj):
+    """Recursive serializer that handles dataclasses and datetime."""
+    if is_dataclass(obj) and not isinstance(obj, type):
+        return {k: _json_safe(v) for k, v in asdict(obj).items()}
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_safe(v) for v in obj]
+    return obj
 
 
 class _DocumentRequestHandler(BaseHTTPRequestHandler):
@@ -376,6 +474,7 @@ class _DocumentRequestHandler(BaseHTTPRequestHandler):
         "search_documents": "_tool_search_documents",
         "search_document_content": "_tool_search_content",
         "get_evidence": "_tool_get_evidence",
+        "get_field_value": "_tool_get_field_value",
         "upload_document": "_tool_upload_document",
     }
 
@@ -456,6 +555,82 @@ class _DocumentRequestHandler(BaseHTTPRequestHandler):
             requestor=self._first_context(args),
         )
         self._send_json(HTTPStatus.OK, results)
+
+    def _tool_get_field_value(self, args: dict) -> None:
+        """Look up a single extracted field on a document version.
+
+        Two-step protocol (policy §5, failures #1) — server-enforced:
+
+          1. First call (no ``confirmation_token``) → status=
+             "requires_confirmation" + a fresh HMAC-signed token bound to
+             (document_id, version, field). The orchestrator/UI shows the
+             confirmation popup and, after the user approves, re-issues the
+             call with the token.
+          2. Second call (with a valid, non-expired ``confirmation_token``
+             whose embedded document_id / version / field match the args)
+             → status="ok" and the actual value is returned.
+
+        The token is server-issued; the client cannot synthesize one. This
+        prevents the previous design where any caller could pass
+        ``confirm=true`` directly and bypass the gate.
+        """
+        document_id = self._required_field(args, "document_id")
+        try:
+            version = int(self._required_field(args, "version"))
+        except (TypeError, ValueError):
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {"error": "version must be an integer"},
+            )
+            return
+        field = self._required_field(args, "field")
+        confirmation_token = args.get("confirmation_token") or ""
+
+        # If the caller didn't present a valid token, treat the call as the
+        # first step of the two-step protocol: ALWAYS return
+        # requires_confirmation regardless of any client-side confirm flag.
+        # (The legacy ``confirm`` arg is ignored for safety.)
+        if not confirmation_token or not _verify_field_confirm_token(
+            confirmation_token,
+            document_id=document_id,
+            version=version,
+            field_name=field,
+        ):
+            try:
+                preview = get_field_value(
+                    self.access_service.repository,
+                    document_id=document_id,
+                    version=version,
+                    field_name=field,
+                    confirm=False,
+                )
+            except FieldAccessError as exc:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+                return
+            payload = _json_safe(preview)
+            payload["confirmation_token"] = _sign_field_confirm_token(
+                document_id=document_id,
+                version=version,
+                field_name=field,
+                ttl=_FIELD_CONFIRM_TTL_SECONDS,
+            )
+            payload["confirmation_ttl_seconds"] = _FIELD_CONFIRM_TTL_SECONDS
+            self._send_json(HTTPStatus.OK, payload)
+            return
+
+        # Token valid — reveal the value.
+        try:
+            result = get_field_value(
+                self.access_service.repository,
+                document_id=document_id,
+                version=version,
+                field_name=field,
+                confirm=True,
+            )
+        except FieldAccessError as exc:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+            return
+        self._send_json(HTTPStatus.OK, _json_safe(result))
 
     def _tool_upload_document(self, args: dict) -> None:
         self._send_json(

@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timezone
 import base64
 import json
 import logging
 import mimetypes
 import re
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -15,11 +15,11 @@ from document_mgmt_service.application.metadata import redact_sensitive_text
 from document_mgmt_service.application.search import SemanticSearchService
 from document_mgmt_service.domain.models import (
     DocumentPrivacyClassification,
+    DocumentSummaryRecord,
+    DocumentVersionRecord,
     SemanticContentSearchResult,
     SemanticDocumentSearchResult,
     SemanticEvidenceResult,
-    DocumentSummaryRecord,
-    DocumentVersionRecord,
 )
 from document_mgmt_service.domain.ports import FileStorage, PostgreSQLDocumentRepository
 
@@ -216,6 +216,18 @@ class DocumentAccessService:
         self._search = search
         self._policy = policy or DocumentAccessPolicy()
         self._auditor = auditor or AccessAuditLogger()
+
+    @property
+    def repository(self) -> PostgreSQLDocumentRepository:
+        """Read-only access to the underlying document repository.
+
+        Used by HTTP-layer tools that need to look up records without
+        going through the full access-policy evaluation pipeline (e.g.
+        ``get_field_value`` does its own policy check after the user has
+        already approved the read). Public on purpose: callers in the
+        adapter layer must not reach into ``_repository`` directly.
+        """
+        return self._repository
 
     def get_document_metadata(self, document_id: str, version: int) -> AccessResponse:
         record = self._load_record(document_id, version)

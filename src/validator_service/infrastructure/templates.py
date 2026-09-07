@@ -35,7 +35,7 @@ _AADHAAR_CARD_TEMPLATE = DocumentTemplate(
     description="Aadhaar card — 2-sided printout (front: photo + number, back: address + govt text)",
     field_rules=(
         FieldRule(
-            name="Aadhaar_number",
+            name="aadhaar_number",
             field_type=FieldType.GOVERNMENT_ID,
             required=True,
             description="12-digit Aadhaar number",
@@ -110,7 +110,7 @@ _AADHAAR_LETTER_TEMPLATE = DocumentTemplate(
     description="Aadhaar letter — full A4 page with govt header, photo, details, and guidelines",
     field_rules=(
         FieldRule(
-            name="Aadhaar_number",
+            name="aadhaar_number",
             field_type=FieldType.GOVERNMENT_ID,
             required=True,
             description="12-digit Aadhaar number",
@@ -185,7 +185,7 @@ _EAADHAAR_TEMPLATE = DocumentTemplate(
     description="e-Aadhaar — downloaded PDF with UIDAI watermark and QR code",
     field_rules=(
         FieldRule(
-            name="Aadhaar_number",
+            name="aadhaar_number",
             field_type=FieldType.GOVERNMENT_ID,
             required=True,
             description="12-digit Aadhaar number",

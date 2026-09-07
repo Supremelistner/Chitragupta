@@ -185,7 +185,7 @@ class TestTemplateRegistry(unittest.TestCase):
         template = self.registry.get_template("aadhaar_card_v1")
         self.assertIsNotNone(template)
         required = [f.name for f in template.field_rules if f.required]
-        self.assertIn("Aadhaar_number", required)
+        self.assertIn("aadhaar_number", required)
         self.assertIn("name", required)
         self.assertIn("date_of_birth", required)
         self.assertIn("gender", required)

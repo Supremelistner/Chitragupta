@@ -134,6 +134,13 @@ def _split_fields(
     * ``summary``  — a redacted, safe-to-show description (used for chat & Qdrant)
     * ``extracted_fields``  — the full values, PII included (encrypted at rest in Postgres)
     * ``field_names``  — the keys, used to build Qdrant ``field_pointers``
+
+    Accepts two shapes for ``fields``:
+
+    * **Flat** (current model contract): ``{"<name>": "<value>", ...}``
+    * **Nested** (legacy): ``{"<name>": {"value": "...", "confidence": ...}, ...}``
+
+    Both shapes are normalized to ``extracted = {"<name>": "<value>"}``.
     """
     if not classification or classification.get("error"):
         return {}, []
@@ -142,9 +149,12 @@ def _split_fields(
         return {}, []
     extracted: dict[str, Any] = {}
     for name, info in fields.items():
-        if not isinstance(info, dict):
-            continue
-        value = info.get("value")
+        if isinstance(info, dict):
+            # Legacy nested shape: {"name": {"value": "X", "confidence": 0.9}}
+            value = info.get("value")
+        else:
+            # Flat shape: {"name": "X"} — the value is the entry itself
+            value = info
         if value is None or value == "":
             continue
         extracted[name] = value
@@ -313,8 +323,22 @@ class IngestionService:
                     metadata["validation_status"] = "ERROR"
                     metadata["validation_error"] = str(exc)
 
-            # Use model classification for description/privacy when available
-            desc_from_model = classification.get("description", {})
+            # Use model classification for description/privacy when available.
+            # The model's METADATA_EXTRACTION prompt emits a flat string for
+            # ``description``; older revisions emitted a dict with
+            # ``safe`` / ``detailed`` keys. Accept both shapes.
+            raw_description = classification.get("description")
+            if isinstance(raw_description, dict):
+                # Legacy nested shape.
+                desc_from_model = raw_description
+                model_description_str: str | None = None
+            elif isinstance(raw_description, str):
+                # Current flat shape: the whole string IS the description.
+                desc_from_model = {}
+                model_description_str = raw_description.strip() or None
+            else:
+                desc_from_model = {}
+                model_description_str = None
             privacy_from_model = classification.get("privacy", {})
 
             # V2: extract ownership + expiry + structured fields from the
@@ -330,6 +354,7 @@ class IngestionService:
             description = (
                 desc_from_model.get("safe")
                 or desc_from_model.get("detailed")
+                or model_description_str
                 or generate_safe_description(
                     filename=request.original_filename,
                     file_kind=file_kind,
@@ -341,7 +366,8 @@ class IngestionService:
 
             privacy = (
                 _parse_privacy(privacy_from_model.get("classification"))
-                if privacy_from_model.get("classification")
+                if isinstance(privacy_from_model, dict)
+                and privacy_from_model.get("classification")
                 else classify_privacy(
                     filename=request.original_filename,
                     content_type=request.content_type,

@@ -1,6 +1,13 @@
-"""Tests for the persona + post-processor."""
+"""Tests for the persona + post-processor.
+
+The persona prompt is generated from `policy.md` + `failures.md`
+(see project root).  These tests check the *behavior* of the prompt
+generator and the post-processor, not the exact wording of the prompt
+(which can be re-derived when either governance document changes).
+"""
 from __future__ import annotations
 
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -47,32 +54,111 @@ class HumanizeTests(unittest.TestCase):
 
 
 class SystemPromptTests(unittest.TestCase):
-    def test_default_prompt_mentions_friend(self) -> None:
-        prompt = build_system_prompt()
-        self.assertIn("friend", prompt.lower())
+    """Behavioral checks on the system prompt.
+
+    The prompt body is derived from `policy.md` and `failures.md` in the
+    project root.  We assert that the prompt:
+
+    * is non-empty,
+    * injects the user's display name,
+    * cites every policy clause (\u00a71-11) and every failures case (#1-15),
+    * lists the four access_action values the orchestrator emits,
+    * names the seven tools the LLM is allowed to call,
+    * contains the banned-phrasing list from policy \u00a78,
+    * itself contains no URLs (it is fed verbatim to the LLM),
+    * uses different display names per call.
+    """
+
+    def test_prompt_is_non_empty(self) -> None:
+        prompt = build_system_prompt(user_name="Test")
+        self.assertGreater(len(prompt), 200,
+                           "prompt should be substantive (>=200 chars)")
 
     def test_user_name_appears(self) -> None:
         prompt = build_system_prompt(user_name="Manish")
         self.assertIn("Manish", prompt)
 
-    def test_prompt_includes_voice_rules(self) -> None:
+    def test_user_name_can_be_absent(self) -> None:
+        # No user_name -> default is "friend" (voice fallback, policy \u00a711).
+        prompt = build_system_prompt()
+        self.assertIn("friend", prompt.lower())
+
+    def test_user_name_replacement_is_per_call(self) -> None:
+        # Two calls with different names should yield different first lines.
+        a = build_system_prompt(user_name="Alice").splitlines()[0]
+        b = build_system_prompt(user_name="Bob").splitlines()[0]
+        self.assertIn("Alice", a)
+        self.assertIn("Bob", b)
+
+    def test_cites_every_policy_clause(self) -> None:
+        # \u00a71-11 (regenerated prompt uses \u00a7 markers).
+        prompt = build_system_prompt(user_name="Test")
+        for n in range(1, 12):
+            self.assertIn(f"\u00a7{n}", prompt,
+                          msg=f"policy \u00a7{n} not cited in prompt")
+
+    def test_cites_every_failure_case(self) -> None:
+        prompt = build_system_prompt(user_name="Test")
+        for n in range(1, 16):
+            self.assertIn(f"#{n}", prompt,
+                          msg=f"failures #{n} not cited in prompt")
+
+    def test_lists_all_four_access_action_values(self) -> None:
+        # The orchestrator's tool router returns one of these four values;
+        # the prompt must respect them all (policy \u00a74).
+        prompt = build_system_prompt(user_name="Test")
+        for value in ("ALLOW", "REDACT", "REQUIRE_APPROVAL", "DENY"):
+            self.assertIn(value, prompt, msg=f"access_action {value} missing")
+
+    def test_lists_all_seven_tools(self) -> None:
+        prompt = build_system_prompt(user_name="Test")
+        for tool in (
+            "list_documents",
+            "search_documents",
+            "get_field_value",
+            "get_document",
+            "get_page",
+            "get_evidence",
+            "web_search",
+        ):
+            self.assertIn(tool, prompt, msg=f"tool {tool} missing")
+
+    def test_contains_banned_phrasings(self) -> None:
+        # Policy \u00a78: 10 banned phrasings.  We assert a representative
+        # subset; if any of these phrases appears in the banned-phrasings
+        # section, the prompt has a banned-phrasing list.
         prompt = build_system_prompt(user_name="Test")
         for marker in (
-            "warm, direct",
-            "raw JSON",
-            "URLs in chat",
-            "list_documents",
-            "web_search",
-            "get_field_value",
-            "ALLOW, REDACT, REQUIRE_APPROVAL, DENY",
+            "I cannot retrieve your X",
+            "Contact support",
+            "Lacks proper OCR",
         ):
-            self.assertIn(marker, prompt, msg=f"missing: {marker}")
+            self.assertIn(marker, prompt,
+                          msg=f"banned-phrasing {marker!r} not listed")
 
-    def test_prompt_has_no_urls(self) -> None:
+    def test_contains_source_of_truth_footer(self) -> None:
         prompt = build_system_prompt(user_name="Test")
-        # The system prompt itself must not contain URLs.
+        self.assertIn("policy.md", prompt)
+        self.assertIn("failures.md", prompt)
+        self.assertIn("policy.md wins", prompt)
+
+    def test_prompt_itself_contains_no_urls(self) -> None:
+        # The system prompt is sent to the LLM; URLs in it would be junk.
+        prompt = build_system_prompt(user_name="Test")
         self.assertNotIn("http://", prompt)
         self.assertNotIn("https://", prompt)
+
+    def test_mentions_owner_type_for_other_documents(self) -> None:
+        # Failures #10: the prompt must instruct the model to say "Priya's
+        # Aadhaar number" (not "your Aadhaar number") when the document
+        # belongs to a relative.
+        prompt = build_system_prompt(user_name="Test")
+        self.assertIn("owner_type", prompt)
+        self.assertIn("relation", prompt)
+        self.assertTrue(
+            re.search(r"Mother", prompt),
+            "prompt should mention the Mother relation example (failures #10)",
+        )
 
 
 if __name__ == "__main__":

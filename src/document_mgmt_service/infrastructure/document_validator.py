@@ -89,8 +89,14 @@ class IngestionValidator:
 
         # Run structural validation
         violations: list[str] = []
+        # Build a case-insensitive lookup once so field-name casing differences
+        # between the model's output (e.g. "aadhaar_number") and the template
+        # definition (e.g. "Aadhaar_number") don't cause spurious "missing"
+        # violations. Keys remain their original case; we just match by
+        # case-folded comparison.
+        fields_ci = {k.casefold(): v for k, v in fields.items()}
         for rule in template.field_rules:
-            field_data = fields.get(rule.name)
+            field_data = fields_ci.get(rule.name.casefold())
             present = field_data is not None and field_data.get("value") is not None
             value = field_data.get("value") if field_data else None
 

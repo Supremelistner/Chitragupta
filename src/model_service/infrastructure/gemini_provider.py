@@ -123,16 +123,17 @@ _PRIVACY_CLASSIFICATION_PROMPT = (
     "Output strictly a JSON object with this exact shape (no markdown fences, "
     "no commentary):\n"
     "{\n"
-    '  "classification": "OPEN" | "SENSITIVE" | "RESTRICTED",\n'
+    '  "classification": "OPEN" | "OPEN_NOT_PUBLIC" | "PRIVATE" | "SENSITIVE",\n'
     '  "rationale": "<one-sentence reason>",\n'
     '  "pii_categories": ["<list of PII types present, e.g. \'aadhaar\', '
-    "'pan', 'passport', 'bank_account', 'medical', 'salary'>]\"\n"
+    "'pan', 'passport', 'bank_account', 'medical', 'salary'>\"]\n"
     "}\n\n"
     "Rules (policy §6):\n"
-    "- RESTRICTED: government-issued IDs (Aadhaar, PAN, passport, driver's\n"
+    "- SENSITIVE: government-issued IDs (Aadhaar, PAN, passport, driver's\n"
     "  license, voter ID), medical records, financial credentials.\n"
-    "- SENSITIVE: payslips, bank statements, contracts, tax documents,\n"
+    "- PRIVATE: payslips, bank statements, contracts, tax documents,\n"
     "  anything with the user's address or phone number.\n"
+    "- OPEN_NOT_PUBLIC: internal documents, drafts, non-public reports.\n"
     "- OPEN: public certificates, generic letters, photos of landscapes or\n"
     "  people that are not IDs, generic receipts.\n"
     "- When in doubt, prefer the MORE restrictive class.\n"

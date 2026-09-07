@@ -201,8 +201,13 @@ class ValidationService:
         violations: list[str] = []
         field_results: list[FieldValidation] = []
 
+        # Case-insensitive field lookup: the model may emit keys like
+        # "aadhaar_number" while a template uses "Aadhaar_number". Without
+        # this, the strict lookup misses and every required field is flagged
+        # as missing even though the data is present.
+        fields_ci = {k.casefold(): v for k, v in extracted_fields.items()}
         for rule in template.field_rules:
-            field_data = extracted_fields.get(rule.name)
+            field_data = fields_ci.get(rule.name.casefold())
             present = field_data is not None and field_data.get("value") is not None
             value = field_data.get("value") if field_data else None
             field_violations: list[str] = []

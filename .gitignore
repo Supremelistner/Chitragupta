@@ -12,6 +12,10 @@ __pycache__/
 # Runtime data and test fixtures
 data/
 src/data/
+# Real document samples — never committed; use data/Synthetic/ for tests
+data/Sample/
+data/Synthetic/
+!**/data/Synthetic/.gitkeep
 # Stray / generated artifacts
 bin/
 lib/

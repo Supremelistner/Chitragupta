@@ -1,0 +1,79 @@
+{
+  "app_name": "चित्रगुप्त",
+  "app_tagline": "आपका निजी दस्तावेज़ सहायक",
+
+  "nav_sessions": "बातचीत",
+  "nav_new_chat": "नई बातचीत",
+  "nav_settings": "सेटिंग्स",
+  "nav_dark_mode": "गहरा रंग",
+  "nav_close": "बंद करें",
+
+  "welcome_greeting": "नमस्ते {name} जी",
+  "welcome_subtitle": "मैं आपके कागज़ात सँभालता हूँ। नीचे कुछ सामान्य काम दिए हैं — या अपना सवाल नीचे लिखें।",
+  "welcome_card_id_title": "ID कार्ड की फोटो",
+  "welcome_card_id_sub": "आधार, पैन, पासपोर्ट",
+  "welcome_card_hospital_title": "अस्पताल के लिए",
+  "welcome_card_hospital_sub": "क्या क्या कागज़ चाहिए",
+  "welcome_card_bank_title": "बैंक / KYC",
+  "welcome_card_bank_sub": "खाता खोलना, KYC",
+  "welcome_card_scheme_title": "सरकारी योजना",
+  "welcome_card_scheme_sub": "पेंशन, राशन, आयुष्मान",
+
+  "quick_id": "मेरे ID दिखाओ",
+  "quick_search": "खोजें",
+  "quick_validate": "जाँचें",
+  "quick_photo": "फोटो लें",
+
+  "input_placeholder": "अपना सवाल यहाँ लिखें…",
+  "input_send": "भेजें",
+  "input_attach": "फोटो जोड़ें",
+  "input_mic": "बोलकर बताएँ",
+  "input_voice_disabled": "जल्द आ रहा है",
+
+  "listening": "सुन रहा हूँ…",
+  "speaking": "बोल रहा हूँ…",
+  "stop_speaking": "रोकें",
+
+  "bot_thinking": "सोच रहा हूँ…",
+  "bot_listen": "🔊 सुनें",
+  "bot_stop": "⏹ रोकें",
+  "bot_save": "💾 सहेजें",
+  "bot_share": "📤 भेजें",
+
+  "confirmation_title": "क्या मैं आपका",
+  "confirmation_field_label": "दिखाऊँ?",
+  "confirmation_yes": "हाँ, दिखाओ",
+  "confirmation_no": "नहीं, रद्द करो",
+  "confirmation_correction_placeholder": "गलत क्षेत्र? सही नाम लिखें",
+
+  "settings_profile": "प्रोफ़ाइल",
+  "settings_name_label": "आपका नाम",
+  "settings_save": "सहेजें",
+  "settings_close": "बंद करें",
+  "settings_done": "हो गया",
+
+  "profile_setup_greeting": "नमस्ते",
+  "profile_setup_prompt": "मुझे आपका नाम बताइए",
+  "profile_setup_helper": "मैं आपको {name} जी कहकर बुलाऊँगा।",
+  "profile_setup_continue": "शुरू करें",
+
+  "error_camera": "कैमरा नहीं खुल रहा। अनुमति दें।",
+  "error_upload": "फोटो नहीं भेज पाए। फिर कोशिश करें।",
+  "error_tts": "आवाज़ नहीं चल पाई। टेक्स्ट पढ़ लें।",
+  "error_network": "इंटरनेट नहीं है। फिर कोशिश करें।",
+
+  "empty_state": "अभी कोई बातचीत नहीं हुई है।",
+  "session_count": "{count} बातचीतें",
+  "session_just_now": "अभी अभी",
+  "session_minutes_ago": "{n} मिनट पहले",
+  "session_hours_ago": "{n} घंटे पहले",
+  "session_days_ago": "{n} दिन पहले",
+
+  "delete_session": "बातचीत मिटाएँ",
+  "delete_confirm": "क्या आप वाक़ई यह बातचीत मिटाना चाहते हैं?",
+
+  "language_label_hi": "हिन्दी",
+  "language_label_en": "English",
+  "language_label_ta": "தமிழ்",
+  "language_label_bn": "বাংলা"
+}

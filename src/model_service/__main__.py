@@ -33,7 +33,7 @@ def _build_providers(config: ModelServiceConfig) -> dict[str, HuggingFaceProvide
     # Gemini. Falls back to Groq only if explicitly configured.
     if config.active_provider == "gemini" and config.gemini_api_key:
         from model_service.infrastructure.gemini_provider import GeminiProviderAdapter
-        providers["huggingface"] = GeminiProviderAdapter(
+        gemini = GeminiProviderAdapter(
             api_key=config.gemini_api_key,
             model_id=config.gemini_model_id,
             tts_model_id=config.gemini_tts_model_id,
@@ -42,6 +42,13 @@ def _build_providers(config: ModelServiceConfig) -> dict[str, HuggingFaceProvide
             temperature=config.default_temperature,
             max_tokens=config.default_max_tokens,
         )
+        providers["huggingface"] = gemini
+        # Also register under the active-provider key so the
+        # repository's lookup by `active_provider == "gemini"` resolves.
+        # Without this, the health check and any subsequent infer call
+        # report "Active provider not found" because the registry only
+        # had the alias under "huggingface".
+        providers["gemini"] = gemini
         print(f"  Primary: Gemini ({config.gemini_model_id}) + TTS ({config.gemini_tts_model_id})")
 
         # Optional: wrap with Groq fallback for Gemini failures.

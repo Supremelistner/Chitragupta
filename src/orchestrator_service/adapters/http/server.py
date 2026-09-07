@@ -222,6 +222,80 @@ def create_app(
             "tool_calls_count": len(response.tool_calls_made),
         }
 
+    # ─── TTS proxy ──────────────────────────────────────────────
+    @app.get("/api/i18n/{lang}")
+    async def i18n(lang: str):
+        """Serve an i18n string table.
+
+        The UI loads translations from a static file in the original
+        design, but FastAPI's StaticFiles doesn't traverse subdirectories
+        by default, so we proxy the JSON through this endpoint. The
+        JSON files live under ``ui/i18n/`` and are loaded from disk.
+        """
+        import pathlib
+        safe = ''.join(c for c in lang if c.isalnum() or c == '-')
+        if not safe:
+            raise HTTPException(status_code=400, detail="invalid lang")
+        candidate = pathlib.Path(__file__).resolve().parents[4] / "ui" / "i18n" / f"{safe}.json"
+        if not candidate.exists():
+            raise HTTPException(status_code=404, detail="not found")
+        from fastapi.responses import FileResponse
+        return FileResponse(candidate, media_type="application/json")
+
+    @app.post("/api/tts")
+    async def tts(request: Request):
+        """Text-to-speech proxy.
+
+        Forwards the request to the model service's
+        ``/infer/synthesize-audio`` endpoint and returns the audio
+        bytes as base64-encoded WAV in a JSON envelope. The UI's
+        audio.js decodes that into a Blob for playback.
+        """
+        body = await request.json()
+        text = (body.get("text") or "").strip()
+        if not text:
+            raise HTTPException(status_code=400, detail="text is required")
+        language = body.get("language") or body.get("lang") or "en-US"
+        # Cap the text length to avoid sending huge payloads to the
+        # model service. 4 KB of text is roughly 5-7 minutes of TTS.
+        text = text[:4000]
+        upstream_url = f"{config.model_service_url.rstrip('/')}/infer/synthesize-audio"
+        upstream_payload = {"text": text, "language": language}
+        if body.get("voice"):
+            upstream_payload["voice"] = body["voice"]
+        try:
+            import httpx as _httpx  # preferred; has timeouts
+            async with _httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(upstream_url, json=upstream_payload)
+        except ImportError:
+            import urllib.request as _ur
+            import urllib.error as _ue
+            req = _ur.Request(
+                upstream_url,
+                data=json.dumps(upstream_payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+            )
+            try:
+                with _ur.urlopen(req, timeout=30) as resp_ur:
+                    data = json.loads(resp_ur.read().decode("utf-8"))
+            except _ue.HTTPError as exc:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"upstream TTS failed: HTTP {exc.code}",
+                ) from exc
+            return {"text": text, "language": language, "audio_base64": data.get("output", "")}
+        if resp.status_code >= 400:
+            raise HTTPException(
+                status_code=502,
+                detail=f"upstream TTS failed: HTTP {resp.status_code}",
+            )
+        data = resp.json()
+        return {
+            "text": text,
+            "language": language,
+            "audio_base64": data.get("output", ""),
+        }
+
     # ─── File Upload ───────────────────────────────────────────────
     @app.post("/api/upload")
     async def upload_file(

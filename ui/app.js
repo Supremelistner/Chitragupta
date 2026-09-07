@@ -1,662 +1,646 @@
 /* ===================================================================
-   Chitragupta Chat UI — app.js
+   Chitragupta Chat UI — main controller
+
+   Responsibilities:
+   - Bootstrap the i18n table, load the active language
+   - Manage the user profile (first-launch modal, settings drawer)
+   - Run the chat loop: send messages, render bot replies, handle
+     confirmation popups, manage sessions
+   - TTS playback via window.Audio
+   - Language switch persists per session via /api/language
+   - Theme switch (light/dark) persists in localStorage
+
+   The backend is unchanged: this file is the only consumer of the
+   new /api/chat, /api/sessions, /api/confirm, /api/language, and
+   /api/tts endpoints.
    =================================================================== */
+(function () {
+    'use strict';
 
-const API = '';  // Same origin
-let currentSessionId = null;
-let pendingConfirmation = null;
-let isLoading = false;
-let pendingFiles = [];  // Array of files ready for upload
+    const API = '';  // same-origin
+    const PROFILE_KEY = 'chitragupta.profile';
+    const THEME_KEY = 'chitragupta.theme';
 
-// DOM
-const messagesEl = document.getElementById('messages');
-const welcomeEl = document.getElementById('welcome-screen');
-const inputEl = document.getElementById('message-input');
-const sendBtn = document.getElementById('btn-send');
-const sessionListEl = document.getElementById('session-list');
-const chatTitleEl = document.getElementById('chat-title');
-const sessionStatusEl = document.getElementById('session-status');
-const confirmBar = document.getElementById('confirmation-bar');
-const confirmMsg = document.getElementById('confirmation-message');
-const confirmCorrection = document.getElementById('confirmation-correction');
-const sidebar = document.getElementById('sidebar');
-const fileInput = document.getElementById('file-input');
-const attachBtn = document.getElementById('btn-attach');
-const uploadPreview = document.getElementById('upload-preview');
-const uploadPreviewContent = document.getElementById('upload-preview-content');
-const uploadPreviewCount = document.getElementById('upload-preview-count');
-const uploadRemoveBtn = document.getElementById('btn-upload-remove');
-const chatMain = document.querySelector('.chat-main');
-const languageBtn = document.getElementById('btn-language-toggle');
-const languageLabel = document.getElementById('language-label');
+    // ─── State ─────────────────────────────────────────────────
+    const state = {
+        currentSessionId: null,
+        profile: null,                 // {display_name}
+        isLoading: false,
+        pendingConfirmation: null,
+        pendingFiles: [],
+        sessions: [],
+        ttsPlayingFor: null,           // id of message currently being spoken
+    };
 
-// BCP-47 codes the user can pick. The orchestrator already supports
-// en, hi, ta, bn (see SUPPORTED_LANGUAGE_CODES in
-// model_service.infrastructure.language_preferences). Keep this in
-// sync with that constant.
-const LANGUAGES = [
-    { code: 'en', label: 'EN' },
-    { code: 'hi', label: 'हिं' },
-    { code: 'ta', label: 'த' },
-    { code: 'bn', label: 'বাং' },
-];
-// index 0 is the user-facing language (what the user sees in chat);
-// index 1 is the inner pipeline language (always English for V1).
-let activeLanguageIndex = 0;  // default: Hindi (en→hi)
+    // ─── DOM ───────────────────────────────────────────────────
+    const $ = (id) => document.getElementById(id);
+    const els = {
+        // Profile
+        profileModal: $('profile-modal'),
+        profileForm: $('profile-form'),
+        profileNameInput: $('profile-name-input'),
+        profileModalGreeting: $('profile-modal-greeting'),
+        profileModalHelper: $('profile-modal-helper'),
+        // Settings
+        settingsDrawer: $('settings-drawer'),
+        settingsForm: $('settings-form'),
+        settingsNameInput: $('settings-name-input'),
+        settingsClose: $('settings-close'),
+        settingsCancel: $('settings-cancel'),
+        themeToggle: $('theme-toggle'),
+        // Brand
+        brandName: $('brand-name'),
+        brandTagline: $('brand-tagline'),
+        // Sidebar
+        sidebar: $('sidebar'),
+        sessionList: $('session-list'),
+        btnNewChat: $('btn-new-chat'),
+        btnSidebarToggle: $('btn-sidebar-toggle'),
+        btnOpenSettings: $('btn-open-settings'),
+        // Chat
+        chatTitle: $('chat-title'),
+        messages: $('messages'),
+        welcome: $('welcome'),
+        welcomeGreeting: $('welcome-greeting'),
+        welcomeSubtitle: $('welcome-subtitle'),
+        // Confirmation pill
+        confirmPill: $('confirm-pill'),
+        confirmMessage: $('confirm-message'),
+        confirmCorrection: $('confirm-correction'),
+        btnApprove: $('btn-approve'),
+        btnDeny: $('btn-deny'),
+        // Upload strip
+        uploadStrip: $('upload-strip'),
+        uploadStripContent: $('upload-strip-content'),
+        btnUploadRemove: $('btn-upload-remove'),
+        // Composer
+        messageInput: $('message-input'),
+        btnSend: $('btn-send'),
+        btnAttach: $('btn-attach'),
+        // Language switch
+        langHi: $('lang-hi'),
+        langEn: $('lang-en'),
+    };
 
-// ─── Init ────────────────────────────────────────────────────────
-document.addEventListener('DOMContentLoaded', () => {
-    loadSessions();
-    setupEventListeners();
-});
+    // ─── i18n helpers ──────────────────────────────────────────
+    function t(key, params) { return window.I18N.t(key, params); }
 
-function setupEventListeners() {
-    sendBtn.addEventListener('click', sendMessage);
-
-    inputEl.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' && !e.shiftKey) {
-            e.preventDefault();
-            sendMessage();
-        }
-    });
-
-    inputEl.addEventListener('input', () => {
-        sendBtn.disabled = !inputEl.value.trim() && pendingFiles.length === 0;
-        autoResize(inputEl);
-    });
-
-    document.getElementById('btn-new-chat').addEventListener('click', createSession);
-    document.getElementById('btn-delete-chat').addEventListener('click', deleteSession);
-    document.getElementById('btn-approve').addEventListener('click', () => respondConfirmation(true));
-    document.getElementById('btn-deny').addEventListener('click', () => respondConfirmation(false));
-
-    document.getElementById('btn-sidebar-toggle').addEventListener('click', () => {
-        sidebar.classList.toggle('open');
-    });
-
-    // Language switch: cycle through LANGUAGES and persist the new
-    // preference for the current session. After the toggle, the next
-    // message the user sends is treated as written in the new
-    // language (the orchestrator translates it to English before the
-    // LLM sees it; bot replies come back in the new language).
-    languageBtn.addEventListener('click', cycleLanguage);
-
-    // Suggestion buttons
-    document.querySelectorAll('.suggestion').forEach(btn => {
-        btn.addEventListener('click', () => {
-            inputEl.value = btn.dataset.message;
-            sendBtn.disabled = false;
-            sendMessage();
+    function applyI18nToStatic() {
+        // Walk the document and replace any element with [data-i18n].
+        document.querySelectorAll('[data-i18n]').forEach((el) => {
+            el.textContent = t(el.dataset.i18n);
         });
-    });
-
-    // File attach button — supports multiple
-    attachBtn.addEventListener('click', () => fileInput.click());
-
-    // File input change — supports multiple
-    fileInput.addEventListener('change', (e) => {
-        for (const file of e.target.files) {
-            handleFileSelect(file);
-        }
-        fileInput.value = '';
-    });
-
-    // Remove file preview
-    uploadRemoveBtn.addEventListener('click', clearPendingFiles);
-
-    // Drag and drop on chat area — supports multiple
-    chatMain.addEventListener('dragover', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        chatMain.classList.add('drag-over');
-    });
-
-    chatMain.addEventListener('dragleave', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        chatMain.classList.remove('drag-over');
-    });
-
-    chatMain.addEventListener('drop', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        chatMain.classList.remove('drag-over');
-        for (const file of e.dataTransfer.files) {
-            handleFileSelect(file);
-        }
-    });
-}
-
-// ─── File Upload (multi-file) ────────────────────────────────────
-function handleFileSelect(file) {
-    const allowedTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/tiff', 'application/pdf'];
-    if (!allowedTypes.includes(file.type)) {
-        appendMessage('assistant', 'Unsupported file type: ' + file.name + '. Please upload an image (JPEG, PNG, WebP) or PDF.');
-        return;
+        document.querySelectorAll('[data-i18n-aria]').forEach((el) => {
+            el.setAttribute('aria-label', t(el.dataset.i18nAria));
+        });
     }
-    if (file.size > 50 * 1024 * 1024) {
-        appendMessage('assistant', file.name + ' is too large (max 50MB).');
-        return;
+
+    // ─── Theme ─────────────────────────────────────────────────
+    function applyTheme(theme) {
+        document.body.dataset.theme = theme;
+        els.themeToggle.checked = (theme === 'dark');
     }
-    pendingFiles.push(file);
-    renderUploadPreview();
-    sendBtn.disabled = false;
-    inputEl.focus();
-}
 
-function renderUploadPreview() {
-    if (pendingFiles.length === 0) {
-        uploadPreview.style.display = 'none';
-        return;
+    function setupTheme() {
+        const stored = localStorage.getItem(THEME_KEY);
+        applyTheme(stored || 'light');
+        els.themeToggle.addEventListener('change', () => {
+            const next = els.themeToggle.checked ? 'dark' : 'light';
+            localStorage.setItem(THEME_KEY, next);
+            applyTheme(next);
+        });
     }
-    uploadPreview.style.display = 'flex';
-    uploadPreviewContent.innerHTML = '';
 
-    pendingFiles.forEach((file) => {
-        const chip = document.createElement('div');
-        chip.className = 'upload-file-chip';
-
-        if (file.type.startsWith('image/')) {
-            const img = document.createElement('img');
-            const reader = new FileReader();
-            reader.onload = (e) => { img.src = e.target.result; };
-            reader.readAsDataURL(file);
-            chip.appendChild(img);
-        } else {
-            const icon = document.createElement('div');
-            icon.className = 'file-icon';
-            icon.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6z"/><path d="M14 2v6h6"/></svg>';
-            chip.appendChild(icon);
-        }
-
-        const name = document.createElement('span');
-        name.className = 'file-name';
-        name.textContent = file.name;
-        chip.appendChild(name);
-
-        const size = document.createElement('span');
-        size.className = 'file-size';
-        size.textContent = formatFileSize(file.size);
-        chip.appendChild(size);
-
-        uploadPreviewContent.appendChild(chip);
-    });
-
-    const total = pendingFiles.length;
-    const totalSize = pendingFiles.reduce((s, f) => s + f.size, 0);
-    uploadPreviewCount.textContent = total + ' file' + (total > 1 ? 's' : '') + ' (' + formatFileSize(totalSize) + ')';
-}
-
-function clearPendingFiles() {
-    pendingFiles = [];
-    uploadPreview.style.display = 'none';
-    uploadPreviewContent.innerHTML = '';
-    uploadPreviewCount.textContent = '';
-    sendBtn.disabled = !inputEl.value.trim();
-}
-
-function formatFileSize(bytes) {
-    if (bytes < 1024) return bytes + ' B';
-    if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-    return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
-}
-
-async function uploadFiles(sessionId) {
-    if (pendingFiles.length === 0) return null;
-
-    const files = [...pendingFiles];
-    clearPendingFiles();
-
-    const results = [];
-    for (const file of files) {
-        const formData = new FormData();
-        formData.append('file', file);
-        if (sessionId) formData.append('session_id', sessionId);
-
+    // ─── Profile ───────────────────────────────────────────────
+    function loadProfile() {
         try {
-            const resp = await fetch(API + '/api/upload', { method: 'POST', body: formData });
-            if (!resp.ok) {
-                const err = await resp.json();
-                results.push({ filename: file.name, error: err.detail || 'Upload failed' });
-            } else {
-                const data = await resp.json();
-                results.push({ filename: file.name, ...data });
-            }
-        } catch (e) {
-            results.push({ filename: file.name, error: e.message });
+            const raw = localStorage.getItem(PROFILE_KEY);
+            if (!raw) return null;
+            const p = JSON.parse(raw);
+            return p && p.display_name ? p : null;
+        } catch {
+            return null;
         }
     }
-    return results;
-}
 
-function autoResize(el) {
-    el.style.height = 'auto';
-    el.style.height = Math.min(el.scrollHeight, 150) + 'px';
-}
-
-// ─── Sessions ────────────────────────────────────────────────────
-async function loadSessions() {
-    try {
-        const res = await fetch(API + '/api/sessions');
-        const data = await res.json();
-        renderSessions(data.sessions || []);
-    } catch (e) {
-        console.error('Failed to load sessions:', e);
-    }
-}
-
-function renderSessions(sessions) {
-    if (sessions.length === 0) {
-        sessionListEl.innerHTML = '<div class="empty-sidebar">No conversations yet.<br>Click + to start one.</div>';
-        return;
+    function saveProfile(p) {
+        localStorage.setItem(PROFILE_KEY, JSON.stringify(p));
     }
 
-    sessionListEl.innerHTML = sessions.map(s => {
-        const active = s.session_id === currentSessionId ? ' active' : '';
-        const time = timeAgo(s.created_at);
-        const initial = (s.title || 'New')[0].toUpperCase();
-        return `
-            <div class="session-item${active}" data-id="${s.session_id}" onclick="selectSession('${s.session_id}')">
-                <div class="session-icon">${initial}</div>
-                <div class="session-info">
-                    <div class="session-title">${escapeHtml(s.title || 'New conversation')}</div>
-                    <div class="session-time">${time} &middot; ${s.message_count} messages</div>
-                </div>
-            </div>`;
-    }).join('');
-}
+    function showProfileModal() {
+        els.profileModal.hidden = false;
+        els.profileNameInput.value = '';
+        setTimeout(() => els.profileNameInput.focus(), 50);
+    }
+    function hideProfileModal() {
+        els.profileModal.hidden = true;
+    }
 
-async function createSession() {
-    try {
-        const res = await fetch(API + '/api/sessions', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ title: 'New conversation' }),
+    function applyProfile() {
+        const name = state.profile ? state.profile.display_name : '';
+        // Greeting uses the user's name. The welcome screen says
+        // "नमस्ते, शर्मा जी" in Hindi or "Hello, Sharma" in English.
+        els.welcomeGreeting.textContent = t('welcome_greeting', { name });
+        els.welcomeSubtitle.textContent = t('welcome_subtitle');
+        // Modal helper: "मैं आपको शर्मा जी कहकर बुलाऊँगा।"
+        els.profileModalHelper.textContent = t('profile_setup_helper', { name: name || '...' });
+        if (state.profile) {
+            els.settingsNameInput.value = state.profile.display_name;
+        }
+    }
+
+    function setupProfile() {
+        state.profile = loadProfile();
+        if (!state.profile) {
+            showProfileModal();
+        } else {
+            applyProfile();
+        }
+        els.profileForm.addEventListener('submit', (e) => {
+            e.preventDefault();
+            const name = els.profileNameInput.value.trim();
+            if (!name) return;
+            state.profile = { display_name: name };
+            saveProfile(state.profile);
+            hideProfileModal();
+            applyProfile();
+            ensureSession();
         });
-        const data = await res.json();
-        currentSessionId = data.session_id;
-        chatTitleEl.textContent = 'New conversation';
-        sessionStatusEl.textContent = '';
-        welcomeEl.style.display = 'flex';
-        messagesEl.innerHTML = '';
-        messagesEl.appendChild(welcomeEl);
-        confirmBar.style.display = 'none';
-        await loadSessions();
-        // Apply the currently-selected UI language to the new session.
-        const lang = LANGUAGES[activeLanguageIndex].code;
-        await fetch(API + '/api/language', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                session_id: currentSessionId,
-                source: lang,
-                target: lang,  // both directions are the user-facing language
-            }),
-        });
-        languageLabel.textContent = LANGUAGES[activeLanguageIndex].label;
-        inputEl.focus();
-    } catch (e) {
-        console.error('Failed to create session:', e);
     }
-}
 
-async function selectSession(sessionId) {
-    currentSessionId = sessionId;
-    welcomeEl.style.display = 'none';
-
-    // Sync the language toggle to whatever this session has stored.
-    try {
-        const langRes = await fetch(
-            API + '/api/language?session_id=' + encodeURIComponent(sessionId)
-        );
-        if (langRes.ok) {
-            const langData = await langRes.json();
-            const idx = LANGUAGES.findIndex(
-                l => l.code === langData.source
-            );
-            if (idx >= 0) {
-                activeLanguageIndex = idx;
-                languageLabel.textContent = LANGUAGES[idx].label;
-            }
+    // ─── Sessions ──────────────────────────────────────────────
+    async function listSessions() {
+        try {
+            const r = await fetch(API + '/api/sessions');
+            if (!r.ok) return [];
+            const data = await r.json();
+            return data.sessions || [];
+        } catch {
+            return [];
         }
-    } catch (e) {
-        // Non-fatal: the toggle just keeps its last-known state.
     }
 
-    try {
-        const res = await fetch(API + '/api/sessions/' + sessionId);
-        const data = await res.json();
-        chatTitleEl.textContent = data.title || 'Conversation';
-
-        // Render messages
-        messagesEl.innerHTML = '';
-        (data.messages || []).forEach(m => appendMessage(m.role, m.content));
-        scrollToBottom();
-    } catch (e) {
-        console.error('Failed to load session:', e);
-    }
-
-    await loadSessions();
-    sidebar.classList.remove('open');
-}
-
-async function deleteSession() {
-    if (!currentSessionId) return;
-    if (!confirm('Delete this conversation?')) return;
-
-    try {
-        await fetch(API + '/api/sessions/' + currentSessionId, { method: 'DELETE' });
-        currentSessionId = null;
-        chatTitleEl.textContent = 'New conversation';
-        sessionStatusEl.textContent = '';
-        messagesEl.innerHTML = '';
-        messagesEl.appendChild(welcomeEl);
-        welcomeEl.style.display = 'flex';
-        confirmBar.style.display = 'none';
-        await loadSessions();
-    } catch (e) {
-        console.error('Failed to delete session:', e);
-    }
-}
-
-// ─── Messages ────────────────────────────────────────────────────
-function sendMessage() {
-    const text = inputEl.value.trim();
-    const hasFiles = pendingFiles.length > 0;
-    if ((!text && !hasFiles) || isLoading) return;
-
-    if (!currentSessionId) {
-        // Auto-create session
-        createSession().then(() => {
-            inputEl.value = text;
-            sendBtn.disabled = false;
-            sendMessage();
-        });
-        return;
-    }
-
-    // Hide welcome
-    welcomeEl.style.display = 'none';
-
-    // Show user message (with file attachment info)
-    let userMsg = text || '';
-    if (hasFiles) {
-        const names = pendingFiles.map(f => f.name).join(', ');
-        const label = '\ud83d\udcce Attached: ' + names;
-        userMsg = userMsg ? userMsg + '\n' + label : label;
-    }
-    appendMessage('user', userMsg);
-    inputEl.value = '';
-    inputEl.style.height = 'auto';
-    sendBtn.disabled = true;
-
-    // Upload files first if present
-    if (hasFiles) {
-        const count = pendingFiles.length;
-        const uploadId = showUploadProgress('Uploading ' + count + ' file' + (count > 1 ? 's' : '') + '...');
-        isLoading = true;
-
-        uploadFiles(currentSessionId).then(uploadResults => {
-            removeTyping(uploadId);
-
-            if (uploadResults && uploadResults.length > 0) {
-                const succeeded = uploadResults.filter(r => !r.error);
-                const failed = uploadResults.filter(r => r.error);
-                if (succeeded.length > 0) {
-                    appendToolInfo(succeeded.length, 'file upload');
-                    const names = succeeded.map(r => r.filename).join(', ');
-                    const plural = succeeded.length > 1 ? 's' : '';
-                    let msg = 'Upload successful: ' + succeeded.length + ' file' + plural;
-                    if (names) msg += '\n' + names;
-                    appendMessage('assistant', msg);
-                }
-                if (failed.length > 0) {
-                    const errMsgs = failed.map(f => f.filename + ': ' + f.error).join('\n');
-                    appendMessage('assistant', 'Failed to upload:\n' + errMsgs);
-                }
-            }
-
-            if (text) {
-                sendChatMessage(text);
-            } else {
-                isLoading = false;
-                scrollToBottom();
-                loadSessions();
-            }
-        }).catch(e => {
-            removeTyping(uploadId);
-            isLoading = false;
-            appendMessage('assistant', 'Upload failed. Please try again.');
-        });
-    } else {
-        sendChatMessage(text);
-    }
-}
-
-function sendChatMessage(text) {
-    const typingId = showTyping();
-    isLoading = true;
-
-    fetch(API + '/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: currentSessionId, message: text }),
-    })
-    .then(r => r.json())
-    .then(data => {
-        removeTyping(typingId);
-        isLoading = false;
-
-        if (data.tool_calls_count > 0) {
-            appendToolInfo(data.tool_calls_count);
-        }
-
-        if (data.message) {
-            appendMessage('assistant', data.message);
-        }
-
-        if (data.confirmation_required) {
-            showConfirmation(data.confirmation_required);
-        }
-
-        if (data.metadata && data.metadata.session_title) {
-            chatTitleEl.textContent = data.metadata.session_title;
-        }
-
-        scrollToBottom();
-        loadSessions();
-    })
-    .catch(e => {
-        removeTyping(typingId);
-        isLoading = false;
-        appendMessage('assistant', 'Sorry, something went wrong. Please try again.');
-        console.error('Chat error:', e);
-    });
-}
-
-function appendMessage(role, content) {
-    const div = document.createElement('div');
-    div.className = `message ${role}`;
-
-    const avatar = role === 'user' ? 'You' : 'C';
-    const formatted = formatContent(content);
-
-    div.innerHTML = `
-        <div class="message-avatar">${avatar}</div>
-        <div class="message-bubble">${formatted}</div>`;
-
-    messagesEl.appendChild(div);
-    scrollToBottom();
-}
-
-function appendToolInfo(count, label) {
-    const div = document.createElement('div');
-    div.className = 'message assistant';
-    const displayLabel = label || 'tool call';
-    div.innerHTML = `
-        <div class="message-avatar">C</div>
-        <div class="message-bubble">
-            <div class="tool-call">
-                <span class="tool-name">${count} ${displayLabel}${count > 1 ? 's' : ''}</span>
-            </div>
-        </div>`;
-    messagesEl.appendChild(div);
-}
-
-function showUploadProgress(msg) {
-    const id = 'upload-' + Date.now();
-    const div = document.createElement('div');
-    div.id = id;
-    div.className = 'upload-progress';
-    div.innerHTML = `<div class="spinner"></div><span>${msg}</span>`;
-    messagesEl.appendChild(div);
-    scrollToBottom();
-    return id;
-}
-
-function showTyping() {
-    const id = 'typing-' + Date.now();
-    const div = document.createElement('div');
-    div.id = id;
-    div.className = 'message assistant';
-    div.innerHTML = `
-        <div class="message-avatar">C</div>
-        <div class="message-bubble">
-            <div class="typing-indicator">
-                <span></span><span></span><span></span>
-            </div>
-        </div>`;
-    messagesEl.appendChild(div);
-    scrollToBottom();
-    return id;
-}
-
-function removeTyping(id) {
-    const el = document.getElementById(id);
-    if (el) el.remove();
-}
-
-// ─── Confirmation ────────────────────────────────────────────────
-function showConfirmation(conf) {
-    pendingConfirmation = conf;
-    confirmMsg.textContent = conf.message || 'This action requires your approval.';
-    if (confirmCorrection) confirmCorrection.value = '';
-    confirmBar.style.display = 'flex';
-}
-
-async function respondConfirmation(approved) {
-    if (!pendingConfirmation) return;
-
-    confirmBar.style.display = 'none';
-    const conf = pendingConfirmation;
-    pendingConfirmation = null;
-
-    // On deny, grab the correction input (if any) so the LLM retries
-    // with the right field name on the next turn.
-    const correction = !approved && confirmCorrection
-        ? confirmCorrection.value.trim()
-        : '';
-    if (confirmCorrection) confirmCorrection.value = '';
-
-    const typingId = showTyping();
-    isLoading = true;
-
-    try {
-        const payload = {
-            session_id: currentSessionId,
-            request_id: conf.request_id,
-            approved: approved,
-        };
-        if (correction) payload.correction = correction;
-        const res = await fetch(API + '/api/confirm', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-        });
-        const data = await res.json();
-        removeTyping(typingId);
-        isLoading = false;
-
-        if (data.message) {
-            appendMessage('assistant', data.message);
-        }
-        scrollToBottom();
-    } catch (e) {
-        removeTyping(typingId);
-        isLoading = false;
-        appendMessage('assistant', 'Failed to process your response. Please try again.');
-    }
-}
-
-// ─── Formatting ──────────────────────────────────────────────────
-function formatContent(text) {
-    if (!text) return '';
-
-    // Escape HTML
-    let html = escapeHtml(text);
-
-    // Code blocks
-    html = html.replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code>$2</code></pre>');
-
-    // Inline code
-    html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
-
-    // Bold
-    html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-
-    // Line breaks
-    html = html.replace(/\n/g, '<br>');
-
-    return html;
-}
-
-function escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
-}
-
-function scrollToBottom() {
-    requestAnimationFrame(() => {
-        messagesEl.scrollTop = messagesEl.scrollHeight;
-    });
-}
-
-function timeAgo(iso) {
-    const seconds = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
-    if (seconds < 60) return 'just now';
-    if (seconds < 3600) return Math.floor(seconds / 60) + 'm ago';
-    if (seconds < 86400) return Math.floor(seconds / 3600) + 'h ago';
-    return Math.floor(seconds / 86400) + 'd ago';
-}
-
-// ─── Language switch (V1 multilingual) ──────────────────────────
-async function cycleLanguage() {
-    if (!currentSessionId) {
-        // No active session: just update the local label so the user
-        // sees feedback; the next session inherits the chosen default.
-        activeLanguageIndex = (activeLanguageIndex + 1) % LANGUAGES.length;
-        languageLabel.textContent = LANGUAGES[activeLanguageIndex].label;
-        return;
-    }
-    const next = LANGUAGES[(activeLanguageIndex + 1) % LANGUAGES.length];
-    try {
-        const res = await fetch(API + '/api/language', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                session_id: currentSessionId,
-                source: next.code,
-                target: next.code,  // user-facing target; inner pipeline stays English
-            }),
-        });
-        if (!res.ok) {
-            console.error('Language switch failed:', res.status);
+    function renderSessionList() {
+        els.sessionList.innerHTML = '';
+        if (!state.sessions.length) {
+            const empty = document.createElement('div');
+            empty.className = 'empty-sidebar';
+            empty.textContent = t('empty_state');
+            els.sessionList.appendChild(empty);
             return;
         }
-        activeLanguageIndex = (activeLanguageIndex + 1) % LANGUAGES.length;
-        languageLabel.textContent = LANGUAGES[activeLanguageIndex].label;
-    } catch (err) {
-        console.error('Language switch error:', err);
+        for (const s of state.sessions) {
+            const item = document.createElement('div');
+            item.className = 'session-item' + (s.session_id === state.currentSessionId ? ' active' : '');
+            item.setAttribute('role', 'listitem');
+            item.dataset.sessionId = s.session_id;
+
+            const title = document.createElement('div');
+            title.className = 'session-title';
+            title.textContent = s.title || t('nav_new_chat');
+
+            const time = document.createElement('div');
+            time.className = 'session-time';
+            time.textContent = formatRelativeTime(s.created_at);
+
+            item.appendChild(title);
+            item.appendChild(time);
+            item.addEventListener('click', () => selectSession(s.session_id));
+            els.sessionList.appendChild(item);
+        }
     }
-}
+
+    function formatRelativeTime(iso) {
+        if (!iso) return '';
+        const t = new Date(iso).getTime();
+        if (Number.isNaN(t)) return '';
+        const diffSec = Math.max(0, Math.floor((Date.now() - t) / 1000));
+        if (diffSec < 60) return t('session_just_now');
+        if (diffSec < 3600) return t('session_minutes_ago', { n: Math.floor(diffSec / 60) });
+        if (diffSec < 86400) return t('session_hours_ago', { n: Math.floor(diffSec / 3600) });
+        return t('session_days_ago', { n: Math.floor(diffSec / 86400) });
+    }
+
+    async function ensureSession() {
+        if (state.currentSessionId) return state.currentSessionId;
+        const r = await fetch(API + '/api/sessions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ title: t('nav_new_chat') }),
+        });
+        const data = await r.json();
+        state.currentSessionId = data.session_id;
+        await refreshSessionList();
+        await applyLanguagePreferenceToCurrentSession();
+        return state.currentSessionId;
+    }
+
+    async function refreshSessionList() {
+        state.sessions = await listSessions();
+        renderSessionList();
+    }
+
+    async function selectSession(sessionId) {
+        state.currentSessionId = sessionId;
+        // Mobile: close the sidebar after selecting.
+        els.sidebar.classList.remove('open');
+        await loadSessionMessages(sessionId);
+        await applyLanguagePreferenceToCurrentSession();
+        renderSessionList();
+    }
+
+    async function loadSessionMessages(sessionId) {
+        try {
+            const r = await fetch(API + '/api/sessions/' + sessionId);
+            if (!r.ok) return;
+            const data = await r.json();
+            els.chatTitle.textContent = data.title || t('nav_new_chat');
+            hideWelcome();
+            renderMessages(data.messages || []);
+        } catch (e) {
+            console.warn('loadSessionMessages failed', e);
+        }
+    }
+
+    // ─── Language switch ──────────────────────────────────────
+    function setLanguageSwitchActive(code) {
+        for (const [el, codeExpected] of [[els.langHi, 'hi'], [els.langEn, 'en']]) {
+            if (!el) continue;
+            el.classList.toggle('active', code === codeExpected);
+        }
+    }
+
+    async function applyLanguagePreferenceToCurrentSession() {
+        if (!state.currentSessionId) return;
+        const lang = window.I18N.getLang();
+        try {
+            await fetch(API + '/api/language', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    session_id: state.currentSessionId,
+                    source: lang,
+                    target: lang,
+                }),
+            });
+        } catch (e) {
+            console.warn('applyLanguagePreferenceToCurrentSession failed', e);
+        }
+    }
+
+    async function setLanguage(code) {
+        if (!window.I18N.listSupported().includes(code)) return;
+        await window.I18N.setLang(code);
+        setLanguageSwitchActive(code);
+        applyI18nToStatic();
+        applyProfile();
+        renderSessionList();   // re-render so localized time labels update
+        if (state.currentSessionId) {
+            await applyLanguagePreferenceToCurrentSession();
+        }
+    }
+
+    function setupLanguageSwitch() {
+        els.langHi.addEventListener('click', () => setLanguage('hi'));
+        els.langEn.addEventListener('click', () => setLanguage('en'));
+    }
+
+    // ─── Welcome screen ───────────────────────────────────────
+    function showWelcome() {
+        els.welcome.hidden = false;
+        els.messages.appendChild(els.welcome);
+        els.chatTitle.textContent = t('nav_new_chat');
+    }
+    function hideWelcome() {
+        els.welcome.hidden = true;
+    }
+
+    function setupLifeCards() {
+        document.querySelectorAll('.life-card').forEach((card) => {
+            card.addEventListener('click', () => {
+                const prompt = card.dataset.quick;
+                if (prompt) {
+                    els.messageInput.value = prompt;
+                    autosize();
+                    sendMessage();
+                }
+            });
+        });
+    }
+
+    // ─── Messages ─────────────────────────────────────────────
+    function renderMessages(messages) {
+        // Wipe everything except the welcome screen.
+        Array.from(els.messages.querySelectorAll('.message, .thinking-row')).forEach((el) => el.remove());
+        for (const m of messages) {
+            appendMessage(m.role, m.content, m.message_id);
+        }
+        scrollToBottom();
+    }
+
+    function appendMessage(role, content, messageId) {
+        if (els.welcome && !els.welcome.hidden) hideWelcome();
+        const row = document.createElement('div');
+        row.className = `message ${role}`;
+        row.dataset.messageId = messageId || '';
+
+        const avatar = document.createElement('div');
+        avatar.className = 'message-avatar';
+        avatar.textContent = role === 'user' ? (state.profile ? state.profile.display_name[0] : 'U') : 'C';
+
+        const bubble = document.createElement('div');
+        bubble.className = 'message-bubble';
+        bubble.textContent = content;
+
+        row.appendChild(avatar);
+        row.appendChild(bubble);
+
+        if (role === 'assistant') {
+            const actions = document.createElement('div');
+            actions.className = 'message-actions';
+            const ttsBtn = document.createElement('button');
+            ttsBtn.className = 'tts-btn';
+            ttsBtn.dataset.messageId = messageId || '';
+            ttsBtn.innerHTML = `<span>${escapeHtml(t('bot_listen'))}</span>`;
+            ttsBtn.addEventListener('click', () => onTtsClick(messageId, content, ttsBtn));
+            actions.appendChild(ttsBtn);
+            bubble.appendChild(actions);
+        }
+
+        els.messages.appendChild(row);
+        scrollToBottom();
+        return row;
+    }
+
+    function showThinkingRow() {
+        const row = document.createElement('div');
+        row.className = 'message assistant thinking-row';
+        const avatar = document.createElement('div');
+        avatar.className = 'message-avatar';
+        avatar.textContent = 'C';
+        const bubble = document.createElement('div');
+        bubble.className = 'message-bubble';
+        const span = document.createElement('span');
+        span.className = 'thinking';
+        span.innerHTML = `<span>${escapeHtml(t('bot_thinking'))}</span><span class="thinking-dots"><span></span><span></span><span></span></span>`;
+        bubble.appendChild(span);
+        row.appendChild(avatar);
+        row.appendChild(bubble);
+        els.messages.appendChild(row);
+        scrollToBottom();
+        return row;
+    }
+
+    function removeThinkingRow() {
+        const r = els.messages.querySelector('.thinking-row');
+        if (r) r.remove();
+    }
+
+    function escapeHtml(s) {
+        const d = document.createElement('div');
+        d.textContent = s;
+        return d.innerHTML;
+    }
+
+    function scrollToBottom() {
+        requestAnimationFrame(() => {
+            els.messages.scrollTop = els.messages.scrollHeight;
+        });
+    }
+
+    // ─── TTS ───────────────────────────────────────────────────
+    function onTtsClick(messageId, text, btn) {
+        if (window.Audio.isPlaying() && state.ttsPlayingFor === messageId) {
+            window.Audio.stop();
+            btn.classList.remove('playing');
+            btn.innerHTML = `<span>${escapeHtml(t('bot_listen'))}</span>`;
+            state.ttsPlayingFor = null;
+            return;
+        }
+        // Stop any other TTS first
+        if (window.Audio.isPlaying()) {
+            window.Audio.stop();
+            document.querySelectorAll('.tts-btn.playing').forEach((b) => {
+                b.classList.remove('playing');
+                b.innerHTML = `<span>${escapeHtml(t('bot_listen'))}</span>`;
+            });
+        }
+        const lang = window.I18N.getLang() === 'hi' ? 'hi-IN' : 'en-US';
+        btn.classList.add('playing');
+        btn.innerHTML = `<span>${escapeHtml(t('stop_speaking'))}</span>`;
+        state.ttsPlayingFor = messageId;
+        window.Audio.speak({
+            text,
+            lang,
+            onEnd: () => {
+                btn.classList.remove('playing');
+                btn.innerHTML = `<span>${escapeHtml(t('bot_listen'))}</span>`;
+                if (state.ttsPlayingFor === messageId) state.ttsPlayingFor = null;
+            },
+            onError: (err) => {
+                btn.classList.remove('playing');
+                btn.innerHTML = `<span>${escapeHtml(t('error_tts'))}</span>`;
+                console.warn('TTS error:', err);
+            },
+        });
+    }
+
+    // ─── Send message ─────────────────────────────────────────
+    async function sendMessage() {
+        if (state.isLoading) return;
+        const text = els.messageInput.value.trim();
+        if (!text && !state.pendingFiles.length) return;
+
+        state.isLoading = true;
+        els.btnSend.disabled = true;
+        els.messageInput.value = '';
+        autosize();
+
+        try {
+            await ensureSession();
+            appendMessage('user', text || '(photo attached)');
+            showThinkingRow();
+            scrollToBottom();
+
+            const r = await fetch(API + '/api/chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    session_id: state.currentSessionId,
+                    message: text,
+                }),
+            });
+            removeThinkingRow();
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            const data = await r.json();
+
+            if (data.confirmation_required) {
+                showConfirmation(data.confirmation_required);
+            } else {
+                hideConfirmation();
+            }
+            if (data.message) {
+                const messageId = 'msg-' + Date.now();
+                appendMessage('assistant', data.message, messageId);
+            }
+            await refreshSessionList();
+        } catch (e) {
+            removeThinkingRow();
+            console.error('sendMessage failed', e);
+            appendMessage('assistant', t('error_network'));
+        } finally {
+            state.isLoading = false;
+            updateSendButton();
+        }
+    }
+
+    function updateSendButton() {
+        const hasContent = els.messageInput.value.trim() || state.pendingFiles.length;
+        els.btnSend.disabled = !hasContent || state.isLoading;
+    }
+
+    function autosize() {
+        const ta = els.messageInput;
+        ta.style.height = 'auto';
+        ta.style.height = Math.min(ta.scrollHeight, 160) + 'px';
+    }
+
+    function setupComposer() {
+        els.btnSend.addEventListener('click', sendMessage);
+        els.messageInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
+        });
+        els.messageInput.addEventListener('input', () => {
+            autosize();
+            updateSendButton();
+        });
+        els.btnAttach.addEventListener('click', () => alert(t('error_camera') + ' (V2)'));
+        updateSendButton();
+    }
+
+    // ─── Confirmation pill ───────────────────────────────────
+    function showConfirmation(data) {
+        state.pendingConfirmation = data;
+        // Build a friendlier confirmation copy: "Should I show your aadhaar_number?"
+        const toolName = data.type || data.tool_name || '';
+        const fieldMatch = (data.tool_args && (data.tool_args.field || data.tool_args.field_name)) || '';
+        const isField = (toolName === 'get_field_value') && fieldMatch;
+        if (isField) {
+            els.confirmMessage.textContent =
+                `${t('confirmation_title')} ${fieldMatch} ${t('confirmation_field_label')}`;
+        } else {
+            els.confirmMessage.textContent = data.message || t('confirmation_title').trim();
+        }
+        els.confirmCorrection.value = '';
+        els.confirmCorrection.placeholder = t('confirmation_correction_placeholder');
+        els.confirmPill.hidden = false;
+        // Re-localize the buttons (they have static HTML labels)
+        els.btnApprove.textContent = t('confirmation_yes');
+        els.btnDeny.textContent = t('confirmation_no');
+    }
+
+    function hideConfirmation() {
+        state.pendingConfirmation = null;
+        els.confirmPill.hidden = true;
+    }
+
+    async function respondConfirmation(approved) {
+        if (!state.pendingConfirmation) return;
+        const correction = els.confirmCorrection.value.trim() || null;
+        const body = {
+            session_id: state.currentSessionId,
+            request_id: state.pendingConfirmation.request_id,
+            approved,
+            correction,
+        };
+        try {
+            const r = await fetch(API + '/api/confirm', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            const data = await r.json();
+            hideConfirmation();
+            if (data.message) {
+                appendMessage('assistant', data.message, 'msg-' + Date.now());
+            }
+        } catch (e) {
+            console.error('respondConfirmation failed', e);
+        }
+    }
+
+    function setupConfirmation() {
+        els.btnApprove.addEventListener('click', () => respondConfirmation(true));
+        els.btnDeny.addEventListener('click', () => respondConfirmation(false));
+    }
+
+    // ─── Settings drawer ─────────────────────────────────────
+    function openSettings() {
+        if (state.profile) els.settingsNameInput.value = state.profile.display_name;
+        els.settingsDrawer.hidden = false;
+        setTimeout(() => els.settingsNameInput.focus(), 50);
+    }
+    function closeSettings() {
+        els.settingsDrawer.hidden = true;
+    }
+
+    function setupSettings() {
+        els.btnOpenSettings.addEventListener('click', openSettings);
+        els.settingsClose.addEventListener('click', closeSettings);
+        els.settingsCancel.addEventListener('click', closeSettings);
+        els.settingsForm.addEventListener('submit', (e) => {
+            e.preventDefault();
+            const name = els.settingsNameInput.value.trim();
+            if (name) {
+                state.profile = { display_name: name };
+                saveProfile(state.profile);
+                applyProfile();
+            }
+            closeSettings();
+        });
+    }
+
+    // ─── Sidebar toggle (mobile) ─────────────────────────────
+    function setupSidebarToggle() {
+        els.btnSidebarToggle.addEventListener('click', () => {
+            els.sidebar.classList.toggle('open');
+        });
+        els.btnNewChat.addEventListener('click', async () => {
+            state.currentSessionId = null;
+            els.messages.innerHTML = '';
+            showWelcome();
+            await ensureSession();
+            await applyLanguagePreferenceToCurrentSession();
+        });
+    }
+
+    // ─── Bootstrap ───────────────────────────────────────────
+    async function main() {
+        const initial = window.I18N.detectInitialLang();
+        await setLanguage(initial);
+        setupTheme();
+        setupProfile();
+        setupLanguageSwitch();
+        setupLifeCards();
+        setupComposer();
+        setupConfirmation();
+        setupSettings();
+        setupSidebarToggle();
+        applyI18nToStatic();
+        if (state.profile) {
+            applyProfile();
+            await ensureSession();
+            await applyLanguagePreferenceToCurrentSession();
+        }
+        await refreshSessionList();
+        if (state.profile && state.currentSessionId) {
+            await loadSessionMessages(state.currentSessionId);
+        }
+    }
+
+    document.addEventListener('DOMContentLoaded', main);
+})();

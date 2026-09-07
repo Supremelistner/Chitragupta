@@ -22,3 +22,13 @@ lib/
 lib64/
 nul
 pyvenv.cfg
+
+# Local development scratch (never public)
+.freebuff/
+.review-diffs/
+
+# Internal governance documents (used as our dev contract, not for public release)
+# Re-add policy.md / failures.md to the public repo only after a sanitisation pass.
+policy.md
+failures.md
+IDEA.md

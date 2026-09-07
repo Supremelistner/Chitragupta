@@ -27,6 +27,22 @@ const uploadPreviewContent = document.getElementById('upload-preview-content');
 const uploadPreviewCount = document.getElementById('upload-preview-count');
 const uploadRemoveBtn = document.getElementById('btn-upload-remove');
 const chatMain = document.querySelector('.chat-main');
+const languageBtn = document.getElementById('btn-language-toggle');
+const languageLabel = document.getElementById('language-label');
+
+// BCP-47 codes the user can pick. The orchestrator already supports
+// en, hi, ta, bn (see SUPPORTED_LANGUAGE_CODES in
+// model_service.infrastructure.language_preferences). Keep this in
+// sync with that constant.
+const LANGUAGES = [
+    { code: 'en', label: 'EN' },
+    { code: 'hi', label: 'हिं' },
+    { code: 'ta', label: 'த' },
+    { code: 'bn', label: 'বাং' },
+];
+// index 0 is the user-facing language (what the user sees in chat);
+// index 1 is the inner pipeline language (always English for V1).
+let activeLanguageIndex = 0;  // default: Hindi (en→hi)
 
 // ─── Init ────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
@@ -57,6 +73,13 @@ function setupEventListeners() {
     document.getElementById('btn-sidebar-toggle').addEventListener('click', () => {
         sidebar.classList.toggle('open');
     });
+
+    // Language switch: cycle through LANGUAGES and persist the new
+    // preference for the current session. After the toggle, the next
+    // message the user sends is treated as written in the new
+    // language (the orchestrator translates it to English before the
+    // LLM sees it; bot replies come back in the new language).
+    languageBtn.addEventListener('click', cycleLanguage);
 
     // Suggestion buttons
     document.querySelectorAll('.suggestion').forEach(btn => {
@@ -259,6 +282,18 @@ async function createSession() {
         messagesEl.appendChild(welcomeEl);
         confirmBar.style.display = 'none';
         await loadSessions();
+        // Apply the currently-selected UI language to the new session.
+        const lang = LANGUAGES[activeLanguageIndex].code;
+        await fetch(API + '/api/language', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                session_id: currentSessionId,
+                source: lang,
+                target: 'en',
+            }),
+        });
+        languageLabel.textContent = LANGUAGES[activeLanguageIndex].label;
         inputEl.focus();
     } catch (e) {
         console.error('Failed to create session:', e);
@@ -268,6 +303,25 @@ async function createSession() {
 async function selectSession(sessionId) {
     currentSessionId = sessionId;
     welcomeEl.style.display = 'none';
+
+    // Sync the language toggle to whatever this session has stored.
+    try {
+        const langRes = await fetch(
+            API + '/api/language?session_id=' + encodeURIComponent(sessionId)
+        );
+        if (langRes.ok) {
+            const langData = await langRes.json();
+            const idx = LANGUAGES.findIndex(
+                l => l.code === langData.source
+            );
+            if (idx >= 0) {
+                activeLanguageIndex = idx;
+                languageLabel.textContent = LANGUAGES[idx].label;
+            }
+        }
+    } catch (e) {
+        // Non-fatal: the toggle just keeps its last-known state.
+    }
 
     try {
         const res = await fetch(API + '/api/sessions/' + sessionId);
@@ -574,4 +628,35 @@ function timeAgo(iso) {
     if (seconds < 3600) return Math.floor(seconds / 60) + 'm ago';
     if (seconds < 86400) return Math.floor(seconds / 3600) + 'h ago';
     return Math.floor(seconds / 86400) + 'd ago';
+}
+
+// ─── Language switch (V1 multilingual) ──────────────────────────
+async function cycleLanguage() {
+    if (!currentSessionId) {
+        // No active session: just update the local label so the user
+        // sees feedback; the next session inherits the chosen default.
+        activeLanguageIndex = (activeLanguageIndex + 1) % LANGUAGES.length;
+        languageLabel.textContent = LANGUAGES[activeLanguageIndex].label;
+        return;
+    }
+    const next = LANGUAGES[(activeLanguageIndex + 1) % LANGUAGES.length];
+    try {
+        const res = await fetch(API + '/api/language', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                session_id: currentSessionId,
+                source: next.code,
+                target: 'en',
+            }),
+        });
+        if (!res.ok) {
+            console.error('Language switch failed:', res.status);
+            return;
+        }
+        activeLanguageIndex = (activeLanguageIndex + 1) % LANGUAGES.length;
+        languageLabel.textContent = LANGUAGES[activeLanguageIndex].label;
+    } catch (err) {
+        console.error('Language switch error:', err);
+    }
 }

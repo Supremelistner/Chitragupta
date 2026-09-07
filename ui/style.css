@@ -190,6 +190,23 @@ body {
 }
 .btn-delete-chat:hover { color: var(--danger); }
 
+/* Language toggle (V1 multilingual). Cycles through en/hi/ta/bn and
+   reflects the current user-facing language in the header chip. */
+.btn-language-toggle {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text);
+    cursor: pointer;
+    padding: 4px 10px;
+    border-radius: var(--radius-sm);
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    transition: border-color 0.15s, color 0.15s;
+}
+.btn-language-toggle:hover { border-color: var(--accent); color: var(--accent); }
+.btn-language-toggle .language-label { display: inline-block; min-width: 28px; text-align: center; }
+
 /* Messages */
 .messages {
     flex: 1;

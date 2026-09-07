@@ -8,6 +8,10 @@ version = "0.1.0"
 description = "Document Management Microservice with MCP and health endpoints"
 readme = "README.md"
 requires-python = ">=3.10"
+license = {text = "GPL-3.0-or-later"}
+authors = [
+    {name = "Chitragupta contributors"},
+]
 dependencies = [
     "fastapi>=0.104.0",
     "uvicorn[standard]>=0.24.0",

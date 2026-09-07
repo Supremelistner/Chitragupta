@@ -290,7 +290,7 @@ async function createSession() {
             body: JSON.stringify({
                 session_id: currentSessionId,
                 source: lang,
-                target: 'en',
+                target: lang,  // both directions are the user-facing language
             }),
         });
         languageLabel.textContent = LANGUAGES[activeLanguageIndex].label;
@@ -647,7 +647,7 @@ async function cycleLanguage() {
             body: JSON.stringify({
                 session_id: currentSessionId,
                 source: next.code,
-                target: 'en',
+                target: next.code,  // user-facing target; inner pipeline stays English
             }),
         });
         if (!res.ok) {

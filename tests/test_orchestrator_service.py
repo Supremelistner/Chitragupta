@@ -12,16 +12,16 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import tempfile
-import unittest
-from datetime import datetime, timezone
-from typing import Any
-from unittest.mock import MagicMock, patch
 
 # -- Test setup --
 import sys
+import tempfile
+import unittest
+from unittest.mock import MagicMock
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from orchestrator_service.application.orchestrator import OrchestrationEngine
 from orchestrator_service.domain.models import (
     ConfirmationRequest,
     ConfirmationType,
@@ -29,26 +29,25 @@ from orchestrator_service.domain.models import (
     MessageRole,
     Plan,
     PlanStatus,
-    PlanStep,
+    ServiceTarget,
     Session,
     SessionStatus,
     ToolCall,
     ToolCallStatus,
 )
-from orchestrator_service.infrastructure.session_store import FileSessionStore
-from orchestrator_service.infrastructure.confirmation_store import InMemoryConfirmationStore
-from orchestrator_service.infrastructure.tool_registry import (
-    DefaultToolRegistry,
-    LLM_VISIBLE_TOOLS,
+from orchestrator_service.domain.ports import LLMResponse
+from orchestrator_service.infrastructure.confirmation_store import (
+    InMemoryConfirmationStore,
 )
 from orchestrator_service.infrastructure.service_clients import (
     HttpServiceClient,
     ServiceClientRouter,
 )
-from orchestrator_service.domain.models import ServiceTarget
-from orchestrator_service.application.orchestrator import OrchestrationEngine
-from orchestrator_service.domain.ports import LLMResponse
-
+from orchestrator_service.infrastructure.session_store import FileSessionStore
+from orchestrator_service.infrastructure.tool_registry import (
+    LLM_VISIBLE_TOOLS,
+    DefaultToolRegistry,
+)
 
 # =========================================================================
 # Session Store Tests
@@ -382,7 +381,53 @@ class TestOrchestrationEngine(unittest.TestCase):
             confirmations=self.confirmations,
             tool_registry=self.registry,
             service_router=self.router,
+            translation_service=self._no_op_translation(),
         )
+
+    def _no_op_translation(self):
+        """Return a translation stub that does nothing.
+
+        Pre-V1 orchestrator tests don't care about language plumbing;
+        they just need a translation service to exist so the engine
+        doesn't lazily try to construct a real Gemini-backed one.
+        """
+        import tempfile as _tmp
+        from pathlib import Path as _Path
+
+        from model_service.infrastructure.language_preferences import (
+            LanguagePreferenceStore,
+        )
+        from model_service.infrastructure.translation_provider import (
+            TranslationResult,
+        )
+
+        class _NoOp:
+            def __init__(self):
+                self._store = LanguagePreferenceStore(
+                    _Path(_tmp.mkdtemp()) / "prefs.json"
+                )
+
+            def translate_user_input(self, text, session_id):
+                return TranslationResult(
+                    text=text, source="en", target="en",
+                    cached=True, latency_ms=0,
+                )
+
+            def translate_bot_reply(self, text, session_id):
+                return TranslationResult(
+                    text=text, source="en", target="en",
+                    cached=True, latency_ms=0,
+                )
+
+            def get_preference(self, session_id):
+                return self._store.get(session_id)
+
+            def set_preference(self, session_id, *, source=None, target=None):
+                return self._store.set(
+                    session_id, source=source, target=target
+                )
+
+        return _NoOp()
 
     def tearDown(self):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
@@ -1019,7 +1064,6 @@ class TestGeminiLLMProvider(unittest.TestCase):
         self.assertEqual(len(resp.tool_calls), 1)
         tc = resp.tool_calls[0]
         self.assertEqual(tc["function"]["name"], "search_documents")
-        import json
         self.assertEqual(json.loads(tc["function"]["arguments"]), {"query": "aadhaar"})
         self.assertTrue(tc["id"].startswith("call_"))
         self.assertEqual(tc["type"], "function")

@@ -16,14 +16,19 @@ import sys
 
 sys.path.insert(0, ".")
 
-from orchestrator_service.config import OrchestratorConfig
 from orchestrator_service.application.orchestrator import OrchestrationEngine
-from orchestrator_service.infrastructure.session_store import FileSessionStore
-from orchestrator_service.infrastructure.file_confirmation_store import FileConfirmationStore
-from orchestrator_service.infrastructure.tool_registry import DefaultToolRegistry
-from orchestrator_service.infrastructure.service_clients import HttpServiceClient, ServiceClientRouter
-from orchestrator_service.infrastructure.llm_provider import QwenLLMProvider
+from orchestrator_service.config import OrchestratorConfig
 from orchestrator_service.domain.models import ServiceTarget
+from orchestrator_service.infrastructure.file_confirmation_store import (
+    FileConfirmationStore,
+)
+from orchestrator_service.infrastructure.llm_provider import QwenLLMProvider
+from orchestrator_service.infrastructure.service_clients import (
+    HttpServiceClient,
+    ServiceClientRouter,
+)
+from orchestrator_service.infrastructure.session_store import FileSessionStore
+from orchestrator_service.infrastructure.tool_registry import DefaultToolRegistry
 
 
 def main() -> None:
@@ -76,7 +81,9 @@ def main() -> None:
     # Either path can be wrapped in a Groq fallback if ORCHESTRATOR_FALLBACK_PROVIDER=groq
     # and GROQ_API_KEY is set.
     if config.gemini_api_key:
-        from orchestrator_service.infrastructure.gemini_llm_provider import GeminiLLMProvider
+        from orchestrator_service.infrastructure.gemini_llm_provider import (
+            GeminiLLMProvider,
+        )
         primary_llm = GeminiLLMProvider(
             api_key=config.gemini_api_key,
             model_id=config.gemini_llm_model_id,
@@ -95,8 +102,12 @@ def main() -> None:
         )
 
     if config.fallback_provider == "groq" and config.groq_api_key:
-        from orchestrator_service.infrastructure.groq_llm_provider import GroqLLMProvider
-        from orchestrator_service.infrastructure.fallback_llm_provider import FallbackLLMProvider
+        from orchestrator_service.infrastructure.fallback_llm_provider import (
+            FallbackLLMProvider,
+        )
+        from orchestrator_service.infrastructure.groq_llm_provider import (
+            GroqLLMProvider,
+        )
         groq_llm = GroqLLMProvider(
             api_key=config.groq_api_key,
             model_id=config.groq_model_id,
@@ -119,6 +130,16 @@ def main() -> None:
     else:
         llm = primary_llm
 
+    # Translation service for V1 multilingual support. Constructed
+    # eagerly so the first user message doesn't pay initialization cost.
+    # When GEMINI_API_KEY is missing the provider raises at first use,
+    # which is fine — the orchestrator should still boot for English-only
+    # users.
+    from model_service.application.translation_service import (
+        get_translation_service,
+    )
+    translation = get_translation_service()
+
     # Orchestration engine
     engine = OrchestrationEngine(
         llm=llm,
@@ -127,6 +148,7 @@ def main() -> None:
         tool_registry=registry,
         service_router=router,
         confirmation_threshold=config.confirmation_threshold,
+        translation_service=translation,
     )
 
     # Start server

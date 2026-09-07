@@ -16,17 +16,13 @@ Endpoints:
 from __future__ import annotations
 
 import io
-import json
 import logging
-import mimetypes
-import os
 from pathlib import Path
-from typing import Any
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
-from fastapi.staticfiles import StaticFiles
 import uvicorn
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from orchestrator_service.application.orchestrator import OrchestrationEngine
 from orchestrator_service.config import OrchestratorConfig
@@ -151,6 +147,62 @@ def create_app(
             ),
             "tool_calls_count": len(response.tool_calls_made),
             "metadata": response.metadata,
+        }
+
+    # ─── Language preference (V1 multilingual) ────────────────────
+    @app.get("/api/language")
+    async def get_language(session_id: str = ""):
+        """Return the current language preference for a session.
+
+        Falls back to the V1 default (en→hi) when the session has not
+        yet set a preference. ``session_id`` is optional: when omitted
+        the response carries only the default so the UI can render
+        the toggle state on first paint.
+        """
+        if not session_id:
+            from model_service.infrastructure.language_preferences import (
+                DEFAULT_PREFERENCE,
+            )
+            return {
+                "source": DEFAULT_PREFERENCE.source,
+                "target": DEFAULT_PREFERENCE.target,
+                "default": True,
+            }
+        pref = engine.get_language_preference(session_id)
+        return {
+            "session_id": session_id,
+            "source": pref.source,
+            "target": pref.target,
+            "default": False,
+        }
+
+    @app.post("/api/language")
+    async def set_language(request: Request):
+        """Update the language preference for a session.
+
+        Body: ``{"session_id": "...", "source": "hi", "target": "en"}``.
+        ``source`` and ``target`` are BCP-47 codes (en, hi, ta, bn).
+        Either or both may be omitted to read the current value. The
+        response echoes the new preference.
+        """
+        body = await request.json()
+        session_id = body.get("session_id", "")
+        if not session_id:
+            raise HTTPException(
+                status_code=400, detail="session_id is required"
+            )
+        try:
+            pref = engine.set_language_preference(
+                session_id,
+                source=body.get("source"),
+                target=body.get("target"),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "session_id": session_id,
+            "source": pref.source,
+            "target": pref.target,
         }
 
     # ─── Confirm ───────────────────────────────────────────────────
@@ -328,9 +380,9 @@ def create_app(
     @app.post("/api/documents/bulk-download")
     async def bulk_download(request: Request):
         """Download multiple documents at once as a zip."""
-        import requests as req_lib
         import zipfile
-        import io
+
+        import requests as req_lib
 
         body = await request.json()
         document_ids = body.get("document_ids", [])  # [{document_id, version}]

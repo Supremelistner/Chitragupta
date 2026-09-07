@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
-import os
 from typing import Any
+
+import requests as _req_lib
 
 from orchestrator_service.domain.models import (
     ConfirmationRequest,
@@ -22,9 +24,6 @@ from orchestrator_service.domain.models import (
     ConversationMessage,
     MessageRole,
     OrchestratorResponse,
-    Plan,
-    PlanStatus,
-    PlanStep,
     Session,
     SessionStatus,
     ToolCall,
@@ -33,13 +32,25 @@ from orchestrator_service.domain.models import (
 from orchestrator_service.domain.ports import (
     ConfirmationStore,
     LLMProvider,
-    ServiceClient,
     SessionStore,
     ToolRegistry,
 )
 from orchestrator_service.infrastructure.service_clients import ServiceClientRouter
-from orchestrator_service.persona import build_system_prompt, humanize as _humanize_reply
-import requests as _req_lib
+from orchestrator_service.persona import build_system_prompt
+from orchestrator_service.persona import humanize as _humanize_reply
+
+# Translation service for V1 multilingual support. Imported lazily so the
+# orchestrator can be unit-tested without the model-service stack present.
+try:
+    from model_service.application.translation_service import (
+        TranslationService,
+    )
+    from model_service.application.translation_service import (
+        get_translation_service as _get_translation_service,
+    )
+except ImportError:  # pragma: no cover -- model service may not be on path
+    TranslationService = None  # type: ignore[assignment,misc]
+    _get_translation_service = None  # type: ignore[assignment]
 
 logger = logging.getLogger("orchestrator.engine")
 
@@ -111,6 +122,7 @@ class OrchestrationEngine:
         tool_registry: ToolRegistry,
         service_router: ServiceClientRouter,
         confirmation_threshold: int = 3,
+        translation_service: Any | None = None,
     ) -> None:
         self._llm = llm
         self._sessions = sessions
@@ -122,6 +134,11 @@ class OrchestrationEngine:
         # message is generated from the user name; otherwise the default
         # ORCHESTRATOR_SYSTEM_PROMPT is used.
         self._user_name: str | None = None
+
+        # Translation service for V1 multilingual support. Optional so
+        # tests can run without the model service on the path. When not
+        # injected, falls back to the module-level singleton on first use.
+        self._translation: Any = translation_service
 
         # Per-user, per-field approval cache. After a user approves
         # get_field_value for a specific (document_id, version, field),
@@ -173,6 +190,35 @@ class OrchestrationEngine:
         3. Calls the LLM with tools
         4. If LLM wants tool calls → executes them (with confirmation if needed)
         5. Feeds results back to LLM for final response
+        6. Translates the response back into the user's UI language
+
+        Translation is applied at the boundary: the user's message is
+        translated to English before it lands in the session history
+        (so the LLM only ever sees English), and the final response
+        message is translated into the user's preferred UI language
+        before returning. When the session is already in English mode
+        these are no-ops with no API cost.
+        """
+        # Translate inbound: the LLM thinks in English regardless of
+        # what the user typed. We swap the local variable so the original
+        # user message is never persisted in the session log (privacy +
+        # reproducibility of the model's internal narrative).
+        inbound = self.translate_user_input(user_message, session_id)
+        english_message = inbound.text
+
+        response = self._process_message_english(session_id, english_message)
+        # Translate outbound: present the response in the user's
+        # preferred UI language.
+        return self._translate_response(response)
+
+    def _process_message_english(
+        self, session_id: str, user_message: str
+    ) -> OrchestratorResponse:
+        """Inner ``process_message`` that operates in English only.
+
+        Split out so the public ``process_message`` can wrap it with
+        translation without polluting the existing logic with language
+        concerns. This function assumes ``user_message`` is in English.
         """
         session = self._sessions.get(session_id)
         if session is None:
@@ -197,6 +243,90 @@ class OrchestrationEngine:
     def set_user_id(self, user_id: str | None) -> None:
         """Set the active user id for per-user approval scoping."""
         self._user_id = user_id
+
+    # ------------------------------------------------------------------
+    # Translation (V1 multilingual)
+    # ------------------------------------------------------------------
+
+    def _get_translation(self) -> Any:
+        """Resolve the translation service, falling back to the singleton."""
+        if self._translation is None:
+            if _get_translation_service is None:
+                raise RuntimeError(
+                    "Translation service is unavailable; the model "
+                    "service package is not on the Python path."
+                )
+            self._translation = _get_translation_service()
+        return self._translation
+
+    def translate_user_input(self, text: str, session_id: str):
+        """Translate the user-typed text from their UI language to English.
+
+        Returns a ``TranslationResult`` with the original text and
+        ``cached=True`` if no translation was needed.
+        """
+        return self._get_translation().translate_user_input(text, session_id)
+
+    def translate_bot_reply(self, text: str, session_id: str):
+        """Translate the LLM's English reply into the user's UI language."""
+        return self._get_translation().translate_bot_reply(text, session_id)
+
+    def set_language_preference(
+        self,
+        session_id: str,
+        *,
+        source: str | None = None,
+        target: str | None = None,
+    ):
+        """Read or update a session's language preference."""
+        return self._get_translation().set_preference(
+            session_id, source=source, target=target
+        )
+
+    def get_language_preference(self, session_id: str):
+        """Return the current preference (falls back to the V1 default)."""
+        return self._get_translation().get_preference(session_id)
+
+    def _translate_response(
+        self, response: OrchestratorResponse
+    ) -> OrchestratorResponse:
+        """Translate the final ``message`` field back into the user's UI language.
+
+        Other fields (plan, confirmation_required, tool_calls_made,
+        metadata) are not translated — they're internal protocol
+        surfaces, not user-facing strings. The confirmation popup's
+        human-readable ``message`` *is* translated when present, since
+        that's user-facing copy.
+        """
+        from dataclasses import replace as _dc_replace
+
+        if not response.message:
+            return response
+
+        result = self.translate_bot_reply(response.message, response.session_id)
+        translation_meta = {
+            "source": result.source,
+            "target": result.target,
+            "cached": result.cached,
+        }
+        new_response = OrchestratorResponse(
+            session_id=response.session_id,
+            message=result.text,
+            plan=response.plan,
+            confirmation_required=response.confirmation_required,
+            tool_calls_made=response.tool_calls_made,
+            metadata={**response.metadata, "translation": translation_meta},
+        )
+        if response.confirmation_required is not None:
+            original_msg = response.confirmation_required.message
+            if original_msg:
+                translated_msg = self.translate_bot_reply(
+                    original_msg, response.session_id
+                ).text
+                new_response.confirmation_required = _dc_replace(
+                    response.confirmation_required, message=translated_msg
+                )
+        return new_response
 
     def _field_approval_key(self, tool_name: str, arguments: dict) -> str | None:
         """Build a cache key for per-tool, per-field approval reuse.
@@ -235,7 +365,26 @@ class OrchestrationEngine:
     def handle_confirmation(
         self, session_id: str, request_id: str, approved: bool, correction: str | None = None
     ) -> OrchestratorResponse:
-        """Handle user's confirmation response."""
+        """Handle user's confirmation response.
+
+        Note: ``correction`` is expected to already be in English. The
+        HTTP layer translates user input from the UI language before
+        passing it in; the orchestrator itself never speaks anything but
+        English internally.
+        """
+        response = self._handle_confirmation_english(
+            session_id, request_id, approved, correction
+        )
+        return self._translate_response(response)
+
+    def _handle_confirmation_english(
+        self,
+        session_id: str,
+        request_id: str,
+        approved: bool,
+        correction: str | None = None,
+    ) -> OrchestratorResponse:
+        """Inner ``handle_confirmation`` that operates in English only."""
         # correction is the user-supplied corrected field name when they
         # deny a confirmation because the LLM picked the wrong field.
         self._confirmations.respond(request_id, approved, correction=correction)

@@ -27,9 +27,14 @@ class MCPServer:
         *,
         config: ModelServiceConfig,
         inference_service: InferenceService,
+        translation_service: Any | None = None,
     ) -> None:
         self._config = config
         self._inference = inference_service
+        # Translation service is optional in __init__ so existing call
+        # sites in __main__.py don't need to change. When not injected,
+        # we build the module-level singleton lazily on first use.
+        self._translation = translation_service
         self._logger = logger
 
     def serve(self) -> None:
@@ -100,6 +105,13 @@ class MCPServer:
             return self._tool_result(request_id, self._inference.set_active_provider(provider))
         if name == "health":
             return self._tool_result(request_id, self._inference.health())
+
+        if name == "translate_text":
+            return self._tool_result(request_id, self._translate_text(arguments))
+        if name == "set_language_preference":
+            return self._tool_result(
+                request_id, self._set_language_preference(arguments)
+            )
 
         return self._error(request_id, -32602, f"Unknown tool: {name}")
 
@@ -315,10 +327,168 @@ class MCPServer:
                 "health", "Health check for the model service.",
                 {"type": "object", "properties": {}, "additionalProperties": False},
             ),
+            self._tool_spec(
+                "translate_text",
+                "Translate text between two BCP-47 language codes "
+                "(e.g. en, hi-IN, ta-IN). Used by the orchestrator's LLM "
+                "to translate the user's input into English for the "
+                "tool loop, and to translate the LLM's English reply "
+                "back into the user's preferred UI language. Returns "
+                "the translated string in the ``text`` field; ``cached`` "
+                "indicates whether the result came from the on-disk "
+                "cache.",
+                {
+                    "type": "object",
+                    "properties": {
+                        "text": {
+                            "type": "string",
+                            "description": "The text to translate.",
+                        },
+                        "source": {
+                            "type": "string",
+                            "description": "BCP-47 source language code "
+                            "(e.g. 'hi', 'hi-IN'). Defaults to 'en'.",
+                            "default": "en",
+                        },
+                        "target": {
+                            "type": "string",
+                            "description": "BCP-47 target language code "
+                            "(e.g. 'hi', 'hi-IN'). Defaults to 'hi'.",
+                            "default": "hi",
+                        },
+                        "session_id": {
+                            "type": "string",
+                            "description": "Optional session id. When "
+                            "provided and source/target are omitted, the "
+                            "session's stored language preference is used.",
+                        },
+                    },
+                    "required": ["text"],
+                    "additionalProperties": False,
+                },
+            ),
+            self._tool_spec(
+                "set_language_preference",
+                "Set or read the language preference for a session. "
+                "Pass at least one of source/target. Pass no language "
+                "fields and only session_id to read the current value. "
+                "Supported codes: en, en-US, en-GB, hi, hi-IN, ta, ta-IN, "
+                "bn, bn-IN.",
+                {
+                    "type": "object",
+                    "properties": {
+                        "session_id": {
+                            "type": "string",
+                            "description": "Session identifier.",
+                        },
+                        "source": {
+                            "type": "string",
+                            "description": "New source language (BCP-47).",
+                        },
+                        "target": {
+                            "type": "string",
+                            "description": "New target language (BCP-47).",
+                        },
+                    },
+                    "required": ["session_id"],
+                    "additionalProperties": False,
+                },
+            ),
         ]
 
     def _tool_spec(self, name: str, description: str, schema: dict) -> dict[str, Any]:
         return {"name": name, "description": description, "inputSchema": schema}
+
+    # -- Translation tools (V1: en <-> hi, plus other supported codes) --
+
+    def _get_translation(self) -> Any:
+        """Resolve the translation service, falling back to the singleton."""
+        if self._translation is None:
+            from model_service.application.translation_service import (
+                get_translation_service,
+            )
+            self._translation = get_translation_service()
+        return self._translation
+
+    def _translate_text(self, args: dict[str, Any]) -> dict[str, Any]:
+        """MCP tool: translate a string between two BCP-47 codes.
+
+        If ``session_id`` is provided and source/target are omitted,
+        the session's stored preference drives the translation. If
+        source == target, the input is echoed unchanged. Errors come
+        back as ``isError`` from the surrounding MCP envelope.
+        """
+        text = (args.get("text") or "").strip()
+        if not text:
+            raise ValueError("text is required")
+        source = args.get("source")
+        target = args.get("target")
+        session_id = args.get("session_id")
+
+        service = self._get_translation()
+
+        # Resolve direction. When session_id is given and either side is
+        # missing, defer to the session's stored preference.
+        if (source is None or target is None) and session_id:
+            pref = service.get_preference(session_id)
+            source = source or pref.source
+            target = target or pref.target
+        else:
+            from model_service.infrastructure.language_preferences import (
+                DEFAULT_PREFERENCE,
+            )
+            source = source or DEFAULT_PREFERENCE.source
+            target = target or DEFAULT_PREFERENCE.target
+
+        # Same-language short-circuit happens inside the service too,
+        # but doing it here lets us return ``cached=True`` even for the
+        # no-op path without paying any allocation.
+        if source == target:
+            return {
+                "text": text,
+                "source": source,
+                "target": target,
+                "cached": True,
+                "latency_ms": 0,
+            }
+
+        from model_service.infrastructure.translation_provider import (
+            TranslationRequest,
+        )
+        result = service._provider.translate(  # type: ignore[attr-defined]
+            TranslationRequest(text=text, source=source, target=target)
+        )
+        return {
+            "text": result.text,
+            "source": result.source,
+            "target": result.target,
+            "cached": result.cached,
+            "latency_ms": result.latency_ms,
+        }
+
+    def _set_language_preference(self, args: dict[str, Any]) -> dict[str, Any]:
+        """MCP tool: read or update a session's language preference.
+
+        With only ``session_id``: returns the current preference.
+        With ``source`` / ``target``: updates and returns the new
+        preference. Both ``source`` and ``target`` are optional but at
+        least one must be provided when *setting*.
+        """
+        session_id = (args.get("session_id") or "").strip()
+        if not session_id:
+            raise ValueError("session_id is required")
+        source = args.get("source")
+        target = args.get("target")
+        service = self._get_translation()
+
+        if source is None and target is None:
+            pref = service.get_preference(session_id)
+            return {"session_id": session_id, **pref.to_dict()}
+
+        pref = service.set_preference(
+            session_id, source=source, target=target
+        )
+        return {"session_id": session_id, **pref.to_dict()}
 
     def _tool_result(self, request_id: Any, payload: dict[str, Any]) -> dict[str, Any]:
         return self._result(
@@ -355,7 +525,7 @@ class MCPServer:
 
     def _write_message(self, writer: Any, message: dict[str, Any]) -> None:
         payload = json.dumps(message, separators=(",", ":")).encode("utf-8")
-        header = f"Content-Length: {len(payload)}\r\n\r\n".encode("utf-8")
+        header = f"Content-Length: {len(payload)}\r\n\r\n".encode()
         writer.write(header)
         writer.write(payload)
         writer.flush()

@@ -180,7 +180,7 @@ class OrchestrationEngine:
         return self._sessions.archive(session_id)
 
     def process_message(
-        self, session_id: str, user_message: str
+        self, session_id: str, user_message: str, file: dict | None = None
     ) -> OrchestratorResponse:
         """Process a user message within a session.
 
@@ -206,14 +206,62 @@ class OrchestrationEngine:
         inbound = self.translate_user_input(user_message, session_id)
         english_message = inbound.text
 
+        if file is not None:
+            english_message = self._attach_file_context(english_message, file)
+
         response = self._process_message_english(session_id, english_message)
         # Translate outbound: present the response in the user's
         # preferred UI language.
         return self._translate_response(response)
 
+    def _attach_file_context(self, english_message: str, file: dict) -> str:
+        """Ingest a chat-attached file via the ``upload_document`` tool and
+        annotate the message with the outcome.
+
+        Never raises: ingestion failures become a system fact line so the
+        LLM can explain them instead of the request dying mid-pipeline.
+        """
+        import base64
+
+        filename = str(file.get("filename") or "attachment")
+        content = file.get("bytes") or b""
+        if not content:
+            note = (
+                f"[System: an empty file named '{filename}' was attached; "
+                f"nothing was ingested.]"
+            )
+            return f"{english_message}\n{note}".strip()
+        try:
+            target = self._registry.get_service("upload_document")
+            if target is None:
+                raise RuntimeError("upload_document tool is not registered")
+            result = self._router.call_tool(target, "upload_document", {
+                "filename": filename,
+                "content_base64": base64.b64encode(content).decode("ascii"),
+                "content_type": file.get("content_type") or "application/octet-stream",
+                "description": english_message[:500],
+            })
+        except Exception as exc:
+            logger.warning("Chat attachment ingest failed: %s", exc)
+            note = (
+                f"[System: attached file '{filename}' could not be ingested "
+                f"({exc}). Ask the user to retry.]"
+            )
+            return f"{english_message}\n{note}".strip()
+        if not isinstance(result, dict) or result.get("error"):
+            detail = result.get("message", "unknown error") if isinstance(result, dict) else "unknown error"
+            note = f"[System: attached file '{filename}' ingest failed: {detail}.]"
+            return f"{english_message}\n{note}".strip()
+        prompt = english_message or "Please process the attached file."
+        fact = (
+            f"[System: attached file '{filename}' ingested as document "
+            f"{result.get('document_id')} (status {result.get('processing_status')}).]"
+        )
+        return f"{prompt}\n{fact}".strip()
+
     def _process_message_english(
-        self, session_id: str, user_message: str
-    ) -> OrchestratorResponse:
+            self, session_id: str, user_message: str, file: dict = None
+        ) -> OrchestratorResponse:
         """Inner ``process_message`` that operates in English only.
 
         Split out so the public ``process_message`` can wrap it with

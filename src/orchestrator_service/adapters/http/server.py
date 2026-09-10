@@ -126,11 +126,31 @@ def create_app(
     # ─── Chat ──────────────────────────────────────────────────────
     @app.post("/api/chat")
     async def chat(request: Request):
-        body = await request.json()
-        session_id = body.get("session_id", "")
-        message = body.get("message", "")
-        if not session_id or not message:
-            raise HTTPException(status_code=400, detail="session_id and message required")
+        content_type = request.headers.get("content-type", "")
+        session_id = ""
+        message = ""
+        file = None
+        if "multipart/form-data" in content_type:
+            form = await request.form()
+            session_id = form.get("session_id", "")
+            message = form.get("message", "")
+            file = form.get("file")
+            if hasattr(file, "read"):
+                file_bytes = await file.read()
+                file = {"filename": file.filename, "content_type": file.content_type, "bytes": file_bytes}
+        else:
+            body = await request.json()
+            session_id = body.get("session_id", "")
+            message = body.get("message", "")
+        if not session_id or (not message and file is None):
+            raise HTTPException(status_code=400, detail="session_id and message (or file) required")
+        if file is not None:
+            message = await _ingest_chat_attachment(
+                message,
+                filename=file.get("filename") or "attachment",
+                content=file.get("bytes") or b"",
+                content_type=file.get("content_type") or "application/octet-stream",
+            )
         response = engine.process_message(session_id, message)
         return {
             "session_id": response.session_id,
@@ -263,38 +283,132 @@ def create_app(
         upstream_payload = {"text": text, "language": language}
         if body.get("voice"):
             upstream_payload["voice"] = body["voice"]
+        # `requests` is a hard runtime dependency (also used by the
+        # upload proxy above); no httpx/urllib fallback chain needed.
+        import requests as req_lib
+
         try:
-            import httpx as _httpx  # preferred; has timeouts
-            async with _httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.post(upstream_url, json=upstream_payload)
-        except ImportError:
-            import urllib.request as _ur
-            import urllib.error as _ue
-            req = _ur.Request(
-                upstream_url,
-                data=json.dumps(upstream_payload).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
-            )
-            try:
-                with _ur.urlopen(req, timeout=30) as resp_ur:
-                    data = json.loads(resp_ur.read().decode("utf-8"))
-            except _ue.HTTPError as exc:
-                raise HTTPException(
-                    status_code=502,
-                    detail=f"upstream TTS failed: HTTP {exc.code}",
-                ) from exc
-            return {"text": text, "language": language, "audio_base64": data.get("output", "")}
+            resp = req_lib.post(upstream_url, json=upstream_payload, timeout=30)
+        except req_lib.exceptions.ConnectionError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="Model service is not running.",
+            ) from exc
+        except req_lib.exceptions.Timeout as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="Upstream TTS timed out.",
+            ) from exc
         if resp.status_code >= 400:
             raise HTTPException(
                 status_code=502,
                 detail=f"upstream TTS failed: HTTP {resp.status_code}",
             )
-        data = resp.json()
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="Upstream TTS returned invalid JSON.",
+            ) from exc
         return {
             "text": text,
             "language": language,
             "audio_base64": data.get("output", ""),
         }
+
+    def _forward_to_document_service(
+        *,
+        filename: str,
+        content: bytes,
+        content_type: str,
+        document_id: str = "",
+        privacy: str = "",
+        description: str = "",
+    ) -> dict:
+        """Forward raw file bytes to the document service for ingestion.
+
+        Shared by /api/upload and chat attachments so both paths get
+        identical error handling. Raises HTTPException on failure,
+        otherwise returns the parsed JSON response.
+        """
+        import requests as req_lib
+
+        files = {"file": (filename, content, content_type)}
+        data: dict[str, str] = {}
+        if document_id:
+            data["document_id"] = document_id
+        if privacy:
+            data["privacy"] = privacy
+        if description:
+            data["description"] = description
+
+        try:
+            resp = req_lib.post(
+                f"{doc_service_url}/documents",
+                files=files,
+                data=data,
+                timeout=120,
+            )
+        except req_lib.exceptions.ConnectionError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Document service is not running. Start it on port 8080.",
+            ) from exc
+        except Exception as exc:
+            logger.exception("Upload failed")
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+        if resp.status_code >= 400:
+            error_msg = resp.text[:500]
+            logger.error("Document upload failed (%d): %s", resp.status_code, error_msg)
+            raise HTTPException(
+                status_code=resp.status_code,
+                detail=f"Document service error: {error_msg}",
+            )
+        return resp.json()
+
+    async def _ingest_chat_attachment(
+        message: str,
+        *,
+        filename: str,
+        content: bytes,
+        content_type: str,
+    ) -> str:
+        """Ingest a file attached to a chat message, then annotate the message.
+
+        Returns the user message with a system fact line carrying the
+        ingestion outcome, so the LLM answers with document IDs and
+        statuses in context. Never raises for ingestion failures — the
+        failure becomes a fact the LLM can explain instead.
+        """
+        if not content:
+            note = f"[System: an empty file named '{filename}' was attached; nothing was ingested.]"
+            return f"{message}\n{note}".strip()
+        try:
+            result = _forward_to_document_service(
+                filename=filename,
+                content=content,
+                content_type=content_type,
+                description=(message or "")[:500],
+            )
+        except HTTPException as exc:
+            note = f"[System: attached file '{filename}' could not be ingested ({exc.detail}).]"
+            return f"{message}\n{note}".strip()
+        docs = result.get("documents") if isinstance(result, dict) else None
+        if docs:
+            parts = ", ".join(
+                f"{d.get('document_id')} (status {d.get('processing_status')})"
+                for d in docs
+            )
+            fact = f"[System: attached file '{filename}' ingested as {len(docs)} document(s): {parts}.]"
+        else:
+            fact = (
+                f"[System: attached file '{filename}' ingested as document "
+                f"{result.get('document_id')} (status {result.get('processing_status')}).]"
+            )
+        prompt = message or "Please process the attached file."
+        return f"{prompt}\n{fact}".strip()
 
     # ─── File Upload ───────────────────────────────────────────────
     @app.post("/api/upload")
@@ -340,36 +454,16 @@ def create_app(
         if not file_bytes:
             raise HTTPException(status_code=400, detail="Uploaded file is empty")
 
-        # Forward to document service
-        import requests as req_lib
-
+        # Forward to document service (shared helper; raises on failure)
         try:
-            # Build multipart form for document service
-            files = {"file": (file.filename, file_bytes, content_type)}
-            data = {}
-            if session_id:
-                data["document_id"] = session_id
-            if privacy:
-                data["privacy"] = privacy
-            if description:
-                data["description"] = description
-
-            resp = req_lib.post(
-                f"{doc_service_url}/documents",
-                files=files,
-                data=data,
-                timeout=120,
+            result = _forward_to_document_service(
+                filename=file.filename,
+                content=file_bytes,
+                content_type=content_type,
+                document_id=session_id,
+                privacy=privacy,
+                description=description,
             )
-
-            if resp.status_code >= 400:
-                error_msg = resp.text[:500]
-                logger.error("Document upload failed (%d): %s", resp.status_code, error_msg)
-                raise HTTPException(
-                    status_code=resp.status_code,
-                    detail=f"Document service error: {error_msg}",
-                )
-
-            result = resp.json()
 
             # Upload responses are intentionally terse; generated descriptions
             # stay available through metadata/description endpoints.
@@ -401,11 +495,6 @@ def create_app(
 
         except HTTPException:
             raise
-        except req_lib.exceptions.ConnectionError:
-            raise HTTPException(
-                status_code=503,
-                detail="Document service is not running. Start it on port 8080.",
-            )
         except Exception as exc:
             logger.exception("Upload failed")
             raise HTTPException(status_code=500, detail=str(exc))

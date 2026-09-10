@@ -57,6 +57,10 @@
             console.warn(`i18n: unsupported language ${lang}`);
             return;
         }
+        // English is the lookup fallback for missing keys, so it must
+        // always be loaded — otherwise a Hindi-first session renders raw
+        // `[key]` placeholders for any key missing in Hindi.
+        await loadLang(DEFAULT_LANG);
         await loadLang(lang);
         activeLang = lang;
         localStorage.setItem(STORAGE_KEY, lang);

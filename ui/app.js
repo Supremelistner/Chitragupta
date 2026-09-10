@@ -28,6 +28,7 @@
         isLoading: false,
         pendingConfirmation: null,
         pendingFiles: [],
+        fileInput: null,             // hidden <input type=file>, owned by setupComposer
         sessions: [],
         ttsPlayingFor: null,           // id of message currently being spoken
     };
@@ -255,8 +256,15 @@
             if (!r.ok) return;
             const data = await r.json();
             els.chatTitle.textContent = data.title || t('nav_new_chat');
-            hideWelcome();
-            renderMessages(data.messages || []);
+            if (data.messages && data.messages.length) {
+                hideWelcome();
+                renderMessages(data.messages);
+            } else {
+                // Empty session (e.g. just created): keep the welcome
+                // screen instead of showing a blank chat.
+                renderMessages([]);
+                showWelcome();
+            }
         } catch (e) {
             console.warn('loadSessionMessages failed', e);
         }
@@ -447,52 +455,77 @@
 
     // ─── Send message ─────────────────────────────────────────
     async function sendMessage() {
-        if (state.isLoading) return;
-        const text = els.messageInput.value.trim();
-        if (!text && !state.pendingFiles.length) return;
+            if (state.isLoading) return;
+            const text = els.messageInput.value.trim();
+            if (!text && !state.pendingFiles.length) return;
 
-        state.isLoading = true;
-        els.btnSend.disabled = true;
-        els.messageInput.value = '';
-        autosize();
+            state.isLoading = true;
+            els.btnSend.disabled = true;
+            els.messageInput.value = '';
+            autosize();
 
-        try {
-            await ensureSession();
-            appendMessage('user', text || '(photo attached)');
-            showThinkingRow();
-            scrollToBottom();
+            try {
+                // Ensure a session exists BEFORE building the body, so the
+                // first-ever message carries a real session_id (previously it
+                // was sent with an empty id and rejected with 400).
+                await ensureSession();
 
-            const r = await fetch(API + '/api/chat', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    session_id: state.currentSessionId,
-                    message: text,
-                }),
-            });
-            removeThinkingRow();
-            if (!r.ok) throw new Error(`HTTP ${r.status}`);
-            const data = await r.json();
+                // Prepare form data if there's a file
+                let body;
+                let headers;
+                if (state.pendingFiles.length > 0) {
+                    const file = state.pendingFiles[0];
+                    const formData = new FormData();
+                    formData.append('session_id', state.currentSessionId || '');
+                    formData.append('message', text);
+                    formData.append('file', file);
+                    body = formData;
+                    headers = {}; // browser sets content-type with boundary
+                } else {
+                    body = JSON.stringify({
+                        session_id: state.currentSessionId,
+                        message: text,
+                    });
+                    headers = { 'Content-Type': 'application/json' };
+                }
 
-            if (data.confirmation_required) {
-                showConfirmation(data.confirmation_required);
-            } else {
-                hideConfirmation();
+                appendMessage('user', text || '(photo attached)');
+                showThinkingRow();
+                scrollToBottom();
+
+                const r = await fetch(API + '/api/chat', {
+                    method: 'POST',
+                    headers,
+                    body,
+                });
+                // Clear pending files after sending
+                state.pendingFiles = [];
+                renderUploadStrip();
+                updateSendButton();
+
+                removeThinkingRow();
+                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                const data = await r.json();
+
+                if (data.confirmation_required) {
+                    showConfirmation(data.confirmation_required);
+                } else {
+                    hideConfirmation();
+                }
+                if (data.message) {
+                    const messageId = 'msg-' + Date.now();
+                    appendMessage('assistant', data.message, messageId);
+                }
+                await refreshSessionList();
+            } catch (e) {
+                removeThinkingRow();
+                console.error('sendMessage failed', e);
+                appendMessage('assistant', t('error_network'));
+            } finally {
+                state.isLoading = false;
+                updateSendButton();
             }
-            if (data.message) {
-                const messageId = 'msg-' + Date.now();
-                appendMessage('assistant', data.message, messageId);
-            }
-            await refreshSessionList();
-        } catch (e) {
-            removeThinkingRow();
-            console.error('sendMessage failed', e);
-            appendMessage('assistant', t('error_network'));
-        } finally {
-            state.isLoading = false;
-            updateSendButton();
         }
-    }
 
     function updateSendButton() {
         const hasContent = els.messageInput.value.trim() || state.pendingFiles.length;
@@ -506,20 +539,71 @@
     }
 
     function setupComposer() {
-        els.btnSend.addEventListener('click', sendMessage);
-        els.messageInput.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                sendMessage();
-            }
-        });
-        els.messageInput.addEventListener('input', () => {
-            autosize();
+            // File attach: open a hidden file input for image selection
+            const fileInput = document.createElement('input');
+            fileInput.type = 'file';
+            fileInput.accept = 'image/*';
+            fileInput.style.display = 'none';
+            fileInput.addEventListener('change', (e) => handleFileSelect(e.target.files));
+            document.body.appendChild(fileInput);
+            state.fileInput = fileInput;
+
+            els.btnAttach.addEventListener('click', () => fileInput.click());
+
+            // The ✕ chip button was previously never wired up.
+            els.btnUploadRemove.addEventListener('click', () => {
+                state.pendingFiles = [];
+                if (state.fileInput) state.fileInput.value = '';
+                renderUploadStrip();
+                updateSendButton();
+                els.messageInput.focus();
+            });
+
+            els.btnSend.addEventListener('click', sendMessage);
+            els.messageInput.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    sendMessage();
+                }
+            });
+            els.messageInput.addEventListener('input', () => {
+                autosize();
+                updateSendButton();
+            });
             updateSendButton();
-        });
-        els.btnAttach.addEventListener('click', () => alert(t('error_camera') + ' (V2)'));
-        updateSendButton();
-    }
+        }
+
+        function handleFileSelect(files) {
+            if (!files || !files.length) return;
+            const file = files[0];
+            // Basic validation: image only, max 10MB
+            if (!file.type.startsWith('image/')) {
+                alert(t('error_upload'));
+                return;
+            }
+            if (file.size > 10 * 1024 * 1024) {
+                alert(t('error_upload'));
+                return;
+            }
+            // Store for sending with next message. Reset the input so
+            // picking the same file again still fires a change event.
+            state.pendingFiles = [file];
+            if (state.fileInput) state.fileInput.value = '';
+            renderUploadStrip();
+            updateSendButton();
+        }
+
+        function renderUploadStrip() {
+            const content = els.uploadStripContent;
+            content.innerHTML = '';
+            for (const file of state.pendingFiles) {
+                const chip = document.createElement('div');
+                chip.className = 'upload-chip';
+                chip.textContent = file.name;
+                content.appendChild(chip);
+            }
+            els.uploadStrip.hidden = state.pendingFiles.length === 0;
+        }
 
     // ─── Confirmation pill ───────────────────────────────────
     function showConfirmation(data) {
@@ -536,6 +620,9 @@
         }
         els.confirmCorrection.value = '';
         els.confirmCorrection.placeholder = t('confirmation_correction_placeholder');
+        state.confirmBusy = false;
+        els.btnApprove.disabled = false;
+        els.btnDeny.disabled = false;
         els.confirmPill.hidden = false;
         // Re-localize the buttons (they have static HTML labels)
         els.btnApprove.textContent = t('confirmation_yes');
@@ -548,7 +635,10 @@
     }
 
     async function respondConfirmation(approved) {
-        if (!state.pendingConfirmation) return;
+        if (!state.pendingConfirmation || state.confirmBusy) return;
+        state.confirmBusy = true;
+        els.btnApprove.disabled = true;
+        els.btnDeny.disabled = true;
         const correction = els.confirmCorrection.value.trim() || null;
         const body = {
             session_id: state.currentSessionId,
@@ -570,12 +660,23 @@
             }
         } catch (e) {
             console.error('respondConfirmation failed', e);
+        } finally {
+            state.confirmBusy = false;
+            els.btnApprove.disabled = false;
+            els.btnDeny.disabled = false;
         }
     }
 
     function setupConfirmation() {
         els.btnApprove.addEventListener('click', () => respondConfirmation(true));
         els.btnDeny.addEventListener('click', () => respondConfirmation(false));
+        // Enter in the correction box approves (it is a single-line input).
+        els.confirmCorrection.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                respondConfirmation(true);
+            }
+        });
     }
 
     // ─── Settings drawer ─────────────────────────────────────
@@ -610,12 +711,20 @@
             els.sidebar.classList.toggle('open');
         });
         els.btnNewChat.addEventListener('click', async () => {
-            state.currentSessionId = null;
-            els.messages.innerHTML = '';
-            showWelcome();
-            await ensureSession();
-            await applyLanguagePreferenceToCurrentSession();
-        });
+                    state.currentSessionId = null;
+                    state.pendingFiles = [];
+                    renderUploadStrip();
+                    els.messages.innerHTML = '';
+                    showWelcome();
+                    await ensureSession();
+                    await applyLanguagePreferenceToCurrentSession();
+                    // Flash the new chat button as feedback
+                    els.btnNewChat.style.transition = 'transform 0.1s';
+                    els.btnNewChat.style.transform = 'scale(0.9)';
+                    setTimeout(() => {
+                        els.btnNewChat.style.transform = '';
+                    }, 100);
+                });
     }
 
     // ─── Bootstrap ───────────────────────────────────────────

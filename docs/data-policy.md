@@ -50,3 +50,59 @@ curl -X POST -F "file=@data/Synthetic/aadhaar.png" \
 All automated tests use `data/Synthetic/`. The real samples in
 `data/Sample/` are kept locally for the project owner's manual testing only
 and must never enter git.
+
+## Assistant handling rules (automated agents, synthetic-only)
+
+These rules isolate the owner's sensitive data from any current or future
+assistant/automation process. They are binding on every assistant session
+working in this repo.
+
+### Red-list — never touch contents, never paste, never commit
+
+- `.env` (secret *values* — tokens, DSNs, `ENCRYPTION_MASTER_KEY`,
+  passwords). Key *names* from `.env.example` may be referenced; values
+  must never be printed, logged, or pasted into chat.
+- `data/Sample/` — real owner documents. Never open, preview, OCR, upload,
+  or copy — not even locally.
+- `data/files/` — stored document binaries (all versions).
+- `data/sessions/` and any confirmations store — conversation history.
+- `data/logs/`, `data/.service_pids` — may contain PII/paths; read only
+  file *names*/sizes when diagnosing, never dump contents into chat.
+- `data/translation_cache.json` — may contain user text. Do not open.
+  (`data/translation_state.json` holds only session-id → lang-code pairs
+  and is safe to read for debugging language routing.)
+- `~/.chitragupta/profile.json` and browser `localStorage`
+  (`chitragupta.profile`, `chitragupta.lang`, `chitragupta.theme`) —
+  never request dumps of these.
+- Live stores: Postgres `chitragupta` database rows, Qdrant
+  `document_chunks` payloads, and docker volumes. Tests must use the
+  per-test isolated schema/collection pattern (`tests/_live_stack.py`);
+  ad-hoc queries against production tables/collections are forbidden.
+- `policy.md` / `failures.md` / `IDEA.md` — internal governance docs,
+  gitignored; do not re-add to the public repo without a sanitisation pass.
+
+### Green-list — safe to use freely
+
+- `.env.example`, `docker-compose.yml`, all source code and tests.
+- `data/Synthetic/` + `scripts/generate_synthetic_docs.py` (regenerate
+  with `python scripts/generate_synthetic_docs.py` when fixtures are stale).
+- `docs/data-policy.md` (this file), `docs/prompt_definitions.html`.
+
+### Operating rules
+
+1. **Synthetic-only I/O.** Every upload, chat message, translation probe,
+   or TTS probe uses generated synthetic fixtures or lorem-style text.
+   Real filenames from `data/Sample/` must not appear in commands.
+2. **Isolated runtime writes.** Live testing overrides
+   `ORCHESTRATOR_SESSION_DIR` (and any file-storage root) to a temp dir
+   so real `data/sessions/` and `data/files/` are never written to.
+3. **Redacted evidence.** Reports show presence/shape only (status codes,
+   counts, field *names*, latency). Never field values, document text,
+   tokens, or DSNs. Health output that echoes a DSN must be scrubbed to
+   `host:port/db` before sharing.
+4. **Pre-commit check.** Before any `git add`/`commit`, run `git status`
+   and refuse if `.env`, `data/` (except the `.gitkeep`), or governance
+   docs are staged.
+5. **Least-priviliege reads.** Prefer `Test-Path`/directory listings over
+   file contents; prefer row *counts* over row contents; stop and ask the
+   owner before any step that would need red-list access.

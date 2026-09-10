@@ -22,6 +22,12 @@
     // internal detail.
     const ENDPOINT = '/api/tts';
 
+    // Capture the native constructor BEFORE we overwrite window.Audio
+    // below. Without this, `new Audio()` inside getAudioEl resolves to
+    // our own controller object and throws "Audio is not a constructor",
+    // which broke every 🔊 Listen button.
+    const NativeAudio = window.Audio;
+
     let audioEl = null;
     let objectUrl = null;
     let currentToken = 0;
@@ -29,7 +35,7 @@
 
     function getAudioEl() {
         if (!audioEl) {
-            audioEl = new Audio();
+            audioEl = new NativeAudio();
             audioEl.preload = 'auto';
             audioEl.addEventListener('ended', () => {
                 playing = false;

@@ -20,6 +20,7 @@
     const API = '';  // same-origin
     const PROFILE_KEY = 'chitragupta.profile';
     const THEME_KEY = 'chitragupta.theme';
+    const AUTOREAD_KEY = 'chitragupta.autoread';
 
     // ─── State ─────────────────────────────────────────────────
     const state = {
@@ -49,6 +50,7 @@
         settingsClose: $('settings-close'),
         settingsCancel: $('settings-cancel'),
         themeToggle: $('theme-toggle'),
+        autoreadToggle: $('autoread-toggle'),
         // Brand
         brandName: $('brand-name'),
         brandTagline: $('brand-tagline'),
@@ -66,6 +68,11 @@
         welcomeSubtitle: $('welcome-subtitle'),
         // Confirmation pill
         confirmPill: $('confirm-pill'),
+        expiryBanner: $('expiry-banner'),
+        expiryTitle: $('expiry-title'),
+        expirySub: $('expiry-sub'),
+        btnExpiryView: $('btn-expiry-view'),
+        btnExpiryDismiss: $('btn-expiry-dismiss'),
         confirmMessage: $('confirm-message'),
         confirmCorrection: $('confirm-correction'),
         btnApprove: $('btn-approve'),
@@ -78,6 +85,7 @@
         messageInput: $('message-input'),
         btnSend: $('btn-send'),
         btnAttach: $('btn-attach'),
+        btnMic: $('btn-mic'),
         // Language switch
         langHi: $('lang-hi'),
         langEn: $('lang-en'),
@@ -85,6 +93,16 @@
 
     // ─── i18n helpers ──────────────────────────────────────────
     function t(key, params) { return window.I18N.t(key, params); }
+
+    // Friendly display name for a stored field ("aadhaar_number" →
+    // "आधार नंबर"). Unknown fields fall back to the raw name so the
+    // popup never renders a [missing-key] placeholder to the user.
+    function fieldLabel(name) {
+        if (!name) return '';
+        const key = 'field_label_' + String(name).toLowerCase();
+        const label = t(key);
+        return (label === `[${key}]`) ? String(name) : label;
+    }
 
     function applyI18nToStatic() {
         // Walk the document and replace any element with [data-i18n].
@@ -110,6 +128,45 @@
             localStorage.setItem(THEME_KEY, next);
             applyTheme(next);
         });
+    }
+
+    // ─── Auto-read replies aloud ───────────────────────────────
+    // Explicit choice wins; otherwise Hindi sessions default ON
+    // (elderly-first) and English sessions default OFF.
+    function isAutoreadOn() {
+        const stored = localStorage.getItem(AUTOREAD_KEY);
+        if (stored === '1') return true;
+        if (stored === '0') return false;
+        return window.I18N.getLang() === 'hi';
+    }
+
+    function applyAutoreadToggle() {
+        els.autoreadToggle.checked = isAutoreadOn();
+    }
+
+    function setupAutoread() {
+        applyAutoreadToggle();
+        els.autoreadToggle.addEventListener('change', () => {
+            localStorage.setItem(AUTOREAD_KEY, els.autoreadToggle.checked ? '1' : '0');
+        });
+    }
+
+    function stopAllTts() {
+        if (!window.Audio.isPlaying()) return;
+        window.Audio.stop();
+        state.ttsPlayingFor = null;
+        document.querySelectorAll('.tts-btn.playing').forEach((b) => {
+            b.classList.remove('playing');
+            b.innerHTML = `<span>${escapeHtml(t('bot_listen'))}</span>`;
+        });
+    }
+
+    function autoSpeakRow(row) {
+        if (!isAutoreadOn() || !row) return;
+        const btn = row.querySelector('.tts-btn');
+        // Small delay so the bubble paints first; a tap meanwhile wins
+        // because onTtsClick toggles (a second click stops).
+        if (btn) setTimeout(() => { if (document.contains(btn)) btn.click(); }, 350);
     }
 
     // ─── Profile ───────────────────────────────────────────────
@@ -171,6 +228,21 @@
         state.profile = loadProfile();
         if (!state.profile) {
             showProfileModal();
+            // One-tap language choice during onboarding: applies live so
+            // the rest of the modal immediately speaks their language.
+            const markOnboardingLang = () => {
+                const cur = window.I18N.getLang();
+                document.querySelectorAll('.profile-lang-switch .lang-chip').forEach((chip) => {
+                    chip.classList.toggle('active', chip.dataset.langCode === cur);
+                });
+            };
+            document.querySelectorAll('.profile-lang-switch .lang-chip').forEach((chip) => {
+                chip.addEventListener('click', async () => {
+                    await setLanguage(chip.dataset.langCode);
+                    markOnboardingLang();
+                });
+            });
+            markOnboardingLang();
         } else {
             applyProfile();
         }
@@ -279,6 +351,7 @@
         await loadSessionMessages(sessionId);
         await applyLanguagePreferenceToCurrentSession();
         renderSessionList();
+        checkExpiring();
     }
 
     async function loadSessionMessages(sessionId) {
@@ -344,6 +417,7 @@
         setLanguageSwitchActive(code);
         applyI18nToStatic();
         applyProfile();
+        applyAutoreadToggle();   // default follows language until chosen
         renderSessionList();   // re-render so localized time labels update
         if (state.currentSessionId) {
             await applyLanguagePreferenceToCurrentSession();
@@ -531,6 +605,7 @@
                     headers = { 'Content-Type': 'application/json' };
                 }
 
+                stopAllTts();
                 appendMessage('user', text || '(photo attached)');
                 showThinkingRow();
                 scrollToBottom();
@@ -556,7 +631,7 @@
                 }
                 if (data.message) {
                     const messageId = 'msg-' + Date.now();
-                    appendMessage('assistant', data.message, messageId);
+                    autoSpeakRow(appendMessage('assistant', data.message, messageId));
                 }
                 // No session-list refetch here: the backend never retitles
                 // or reorders on new messages, and the session was already
@@ -605,6 +680,7 @@
             });
 
             els.btnSend.addEventListener('click', sendMessage);
+            setupMic();
             els.messageInput.addEventListener('keydown', (e) => {
                 if (e.key === 'Enter' && !e.shiftKey) {
                     e.preventDefault();
@@ -616,6 +692,76 @@
                 updateSendButton();
             });
             updateSendButton();
+        }
+
+        // ─── Voice input (Web Speech API; server STT reserved for later) ──
+        function speechRecognitionClass() {
+            return window.SpeechRecognition || window.webkitSpeechRecognition || null;
+        }
+
+        function setupMic() {
+            const SR = speechRecognitionClass();
+            if (!SR) {
+                // No voice support (old browser): hide the button rather
+                // than show a dead control to elderly users.
+                els.btnMic.hidden = true;
+                return;
+            }
+            els.btnMic.setAttribute('aria-label', t('input_mic'));
+            els.btnMic.addEventListener('click', toggleMic);
+        }
+
+        function recognitionLang() {
+            const lang = window.I18N.getLang();
+            return lang === 'hi' ? 'hi-IN' : lang === 'en' ? 'en-US' : lang;
+        }
+
+        function toggleMic() {
+            if (state.recognition) {
+                state.recognition.stop();
+                return;
+            }
+            const SR = speechRecognitionClass();
+            if (!SR) return;
+            const rec = new SR();
+            rec.lang = recognitionLang();
+            rec.interimResults = true;
+            rec.maxAlternatives = 1;
+            // Append (don't replace): the user may have typed + spoken.
+            const base = els.messageInput.value;
+            const basePrefix = base && !base.endsWith(' ') ? base + ' ' : base;
+            rec.onresult = (e) => {
+                let interim = '';
+                let finalText = '';
+                for (const res of e.results) {
+                    if (res.isFinal) finalText += res[0].transcript;
+                    else interim += res[0].transcript;
+                }
+                els.messageInput.value = basePrefix + (finalText || interim);
+                autosize();
+                updateSendButton();
+            };
+            rec.onerror = (e) => {
+                if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+                    alert(t('error_mic'));
+                }
+                // 'no-speech'/'aborted' are normal; stay silent.
+            };
+            rec.onend = () => {
+                state.recognition = null;
+                els.btnMic.classList.remove('listening');
+                els.btnMic.setAttribute('aria-label', t('input_mic'));
+                els.messageInput.focus();
+            };
+            state.recognition = rec;
+            els.btnMic.classList.add('listening');
+            els.btnMic.setAttribute('aria-label', t('stop_speaking'));
+            try {
+                rec.start();
+            } catch (e) {
+                state.recognition = null;
+                els.btnMic.classList.remove('listening');
+            }
         }
 
         function handleFileSelect(files) {
@@ -650,6 +796,55 @@
             els.uploadStrip.hidden = state.pendingFiles.length === 0;
         }
 
+    // ─── Expiry banner (proactive renewal reminder) ────────────
+    function docDisplayName(d) {
+        return d.description || d.summary
+            || (d.document_id ? String(d.document_id).slice(0, 8) + '…' : '');
+    }
+
+    async function checkExpiring() {
+        hideExpiryBanner();
+        const sid = state.currentSessionId;
+        if (!sid) return;
+        // Once per session per pageload: quiet, never nagging.
+        state.expiryChecked = state.expiryChecked || new Set();
+        if (state.expiryChecked.has(sid)) return;
+        state.expiryChecked.add(sid);
+        let items = [];
+        try {
+            const r = await fetch(API + '/api/expiring?within_days=30');
+            if (!r.ok) return;
+            items = (await r.json()).results || [];
+        } catch (e) {
+            console.warn('checkExpiring failed', e);
+            return;
+        }
+        if (!items.length) return;
+        const first = items[0];
+        const days = first.days_until_expiry;
+        const name = docDisplayName(first);
+        els.expiryTitle.textContent = t('expiry_banner_title', { count: items.length });
+        els.expirySub.textContent = days < 0
+            ? t('expiry_banner_overdue', { name, days: Math.abs(days) })
+            : t('expiry_banner_soon', { name, days });
+        els.btnExpiryView.textContent = t('expiry_banner_view');
+        els.expiryBanner.hidden = false;
+    }
+
+    function hideExpiryBanner() {
+        els.expiryBanner.hidden = true;
+    }
+
+    function setupExpiryBanner() {
+        els.btnExpiryDismiss.addEventListener('click', hideExpiryBanner);
+        els.btnExpiryView.addEventListener('click', () => {
+            hideExpiryBanner();
+            els.messageInput.value = t('expiry_banner_ask');
+            autosize();
+            sendMessage();
+        });
+    }
+
     // ─── Confirmation pill ───────────────────────────────────
     function showConfirmation(data) {
         state.pendingConfirmation = data;
@@ -659,7 +854,7 @@
         const isField = (toolName === 'get_field_value') && fieldMatch;
         if (isField) {
             els.confirmMessage.textContent =
-                `${t('confirmation_title')} ${fieldMatch} ${t('confirmation_field_label')}`;
+                `${t('confirmation_title')} ${fieldLabel(fieldMatch)} ${t('confirmation_field_label')}`;
         } else {
             els.confirmMessage.textContent = data.message || t('confirmation_title').trim();
         }
@@ -701,7 +896,7 @@
             const data = await r.json();
             hideConfirmation();
             if (data.message) {
-                appendMessage('assistant', data.message, 'msg-' + Date.now());
+                autoSpeakRow(appendMessage('assistant', data.message, 'msg-' + Date.now()));
             }
         } catch (e) {
             console.error('respondConfirmation failed', e);
@@ -777,6 +972,7 @@
                     showWelcome();
                     await ensureSession();
                     await applyLanguagePreferenceToCurrentSession();
+                    checkExpiring();
                     // Flash the new chat button as feedback
                     els.btnNewChat.style.transition = 'transform 0.1s';
                     els.btnNewChat.style.transform = 'scale(0.9)';
@@ -791,11 +987,13 @@
         const initial = window.I18N.detectInitialLang();
         await setLanguage(initial);
         setupTheme();
+        setupAutoread();
         setupProfile();
         setupLanguageSwitch();
         setupLifeCards();
         setupComposer();
         setupConfirmation();
+        setupExpiryBanner();
         setupSettings();
         setupSidebarToggle();
         applyI18nToStatic();

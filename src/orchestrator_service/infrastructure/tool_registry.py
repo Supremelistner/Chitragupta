@@ -43,6 +43,17 @@ _TOOL_DEFINITIONS: dict[str, tuple[ServiceTarget, str, dict[str, Any], Confirmat
         {"type": "object", "properties": {}},
         None,
     ),
+    "list_expiring_documents": (
+        ServiceTarget.DOCUMENT,
+        "List documents expiring within N days (overdue ones included, most urgent first). Returns safe summaries with days_until_expiry (negative = already expired). Use when the user asks about renewals, validity, or expiring documents.",
+        {
+            "type": "object",
+            "properties": {
+                "within_days": {"type": "integer", "description": "Lookahead window in days (default 60, 1-365)"},
+            },
+        },
+        None,
+    ),
     "search_documents": (
         ServiceTarget.DOCUMENT,
         "Search documents by semantic similarity. Returns document IDs and summaries. ALWAYS call this FIRST when the user mentions a document by name or description — use the returned document_id and version for all other tool calls.",
@@ -415,6 +426,7 @@ _TOOL_DEFINITIONS: dict[str, tuple[ServiceTarget, str, dict[str, Any], Confirmat
 LLM_VISIBLE_TOOLS = {
     "upload_document",
     "list_documents",
+    "list_expiring_documents",
     "search_documents",
     "search_document_content",
     "get_document_metadata",

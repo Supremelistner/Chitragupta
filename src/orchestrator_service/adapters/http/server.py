@@ -63,9 +63,10 @@ def create_app(
 
     # ─── No-store for UI assets ──────────────────────────────────
     # Stale cached app.js/i18n JSON once left users running fixed bugs
-    # (and fixed bugs looking broken). Single-user LAN app: always
-    # refetch the shell + scripts (~30KB, negligible cost). API JSON
-    # responses are unaffected (only "/" and "/static/*" match).
+    # (and fixed bugs looking broken — including a literal "[error_mic]"
+    # alert from a cached string table). Single-user LAN app: always
+    # refetch the shell, scripts, and string tables (kilobytes,
+    # negligible cost). Other API JSON responses are unaffected.
     try:
         from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -73,7 +74,11 @@ def create_app(
             async def dispatch(self, request, call_next):  # noqa: ANN001, ANN202
                 response = await call_next(request)
                 path = request.url.path
-                if path == "/" or path.startswith("/static/"):
+                if (
+                    path == "/"
+                    or path.startswith("/static/")
+                    or path.startswith("/api/i18n/")
+                ):
                     response.headers["Cache-Control"] = "no-store"
                 return response
 
@@ -244,6 +249,16 @@ def create_app(
             "source": pref.source,
             "target": pref.target,
         }
+
+    # ─── Expiring documents (proactive banner, no chat turn) ─────
+    @app.get("/api/expiring")
+    async def expiring(within_days: int = 30):
+        """Documents expiring within N days (overdue included).
+
+        Powers the welcome-screen banner. Session-independent; failures
+        collapse to an empty list so the banner just stays hidden.
+        """
+        return engine.list_expiring_documents(within_days=within_days)
 
     # ─── Profile (display name for the persona) ───────────────────
     @app.get("/api/profile")

@@ -456,6 +456,27 @@ body {
     40% { transform: scale(1.0); opacity: 1; }
 }
 
+/* ─── Expiry banner (proactive renewal reminder) ───────────── */
+.expiry-banner {
+    margin: 12px 24px 0;
+    padding: 14px 16px;
+    background: var(--warning-soft);
+    border: 1.5px solid var(--warning);
+    border-radius: var(--radius);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 16px;
+    box-shadow: var(--shadow);
+    animation: slideUp 0.2s ease-out;
+}
+.expiry-icon { font-size: 28px; line-height: 1; flex-shrink: 0; }
+.expiry-text { flex: 1; min-width: 0; }
+.expiry-title { font-weight: 700; }
+.expiry-sub { color: var(--text-dim); font-size: 15px; }
+.expiry-actions { display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
+.expiry-actions .btn { min-height: 44px; padding: 8px 18px; }
+
 /* ─── Confirmation pill ────────────────────────────────────── */
 .confirm-pill {
     margin: 0 24px 8px;
@@ -550,7 +571,7 @@ body {
 }
 #message-input::placeholder { color: var(--text-muted); }
 
-.composer-attach, .composer-send {
+.composer-attach, .composer-mic, .composer-send {
     width: 48px; height: 48px;
     border-radius: 50%;
     border: none;
@@ -564,6 +585,13 @@ body {
     transition: background 0.15s, color 0.15s, transform 0.1s;
 }
 .composer-attach:hover { color: var(--accent); background: var(--bg-hover); }
+.composer-mic:hover { color: var(--accent); background: var(--bg-hover); }
+/* Recording state: unmissable red pulse while the app listens. */
+.composer-mic.listening {
+    background: var(--danger);
+    color: var(--text-inverse);
+    animation: ttsPulse 1.4s ease-in-out infinite;
+}
 .composer-send {
     background: var(--accent);
     color: var(--text-inverse);
@@ -673,6 +701,15 @@ body {
     min-height: 60px;
 }
 .profile-name-input:focus { border-color: var(--accent); }
+.profile-lang-switch {
+    align-self: center;
+    margin: 4px 0;
+}
+.profile-lang-switch .lang-chip {
+    font-size: 18px;
+    padding: 12px 24px;
+    min-height: 52px;
+}
 
 /* ─── Settings drawer ─────────────────────────────────────── */
 .drawer {
@@ -807,4 +844,6 @@ body {
 .drawer[hidden],
 .confirm-pill[hidden],
 .upload-strip[hidden],
+.composer-mic[hidden],
+.expiry-banner[hidden],
 .welcome[hidden] { display: none !important; }

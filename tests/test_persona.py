@@ -161,5 +161,42 @@ class SystemPromptTests(unittest.TestCase):
         )
 
 
+class TestElderlyAudienceRules(unittest.TestCase):
+    """The ELDERLY AUDIENCE section must survive prompt edits."""
+
+    def test_elderly_section_present(self) -> None:
+        prompt = build_system_prompt(user_name="Test")
+        self.assertIn("ELDERLY AUDIENCE", prompt)
+
+    def test_no_emoji_rule(self) -> None:
+        prompt = build_system_prompt(user_name="Test").lower()
+        self.assertIn("emojis", prompt)
+
+    def test_speakable_numbers_rule(self) -> None:
+        prompt = build_system_prompt(user_name="Test").lower()
+        self.assertIn("digit", prompt)
+
+    def test_one_ask_per_reply_rule(self) -> None:
+        prompt = build_system_prompt(user_name="Test").lower()
+        self.assertIn("one question or one action", prompt)
+
+    def test_user_name_personalizes_prompt(self) -> None:
+        prompt = build_system_prompt(user_name="Sharma")
+        self.assertIn("Sharma", prompt)
+
+    def test_expiring_tool_in_toolset(self) -> None:
+        prompt = build_system_prompt(user_name="Test")
+        self.assertIn("list_expiring_documents", prompt)
+
+    def test_scam_safety_rule_present(self) -> None:
+        prompt = build_system_prompt(user_name="Test")
+        self.assertIn("SCAM SAFETY", prompt)
+        self.assertIn("OTP", prompt)
+
+    def test_family_upload_guidance_present(self) -> None:
+        prompt = build_system_prompt(user_name="Test").lower()
+        self.assertIn("mother", prompt)
+
+
 if __name__ == "__main__":
     unittest.main()

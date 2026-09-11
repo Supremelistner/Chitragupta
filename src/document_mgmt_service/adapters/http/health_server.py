@@ -477,6 +477,7 @@ class _DocumentRequestHandler(BaseHTTPRequestHandler):
     # orchestrator needing to know each route.
     _TOOL_DISPATCH_GET = {
         "list_documents": "_tool_list_documents",
+        "list_expiring_documents": "_tool_list_expiring_documents",
         "list_templates": "_tool_list_templates",
         "get_template": "_tool_get_template",
         "get_alerts": "_tool_get_alerts",
@@ -488,6 +489,7 @@ class _DocumentRequestHandler(BaseHTTPRequestHandler):
     }
     _TOOL_DISPATCH_POST = {
         "list_documents": "_tool_list_documents",
+        "list_expiring_documents": "_tool_list_expiring_documents",
         "search_documents": "_tool_search_documents",
         "search_document_content": "_tool_search_content",
         "get_evidence": "_tool_get_evidence",
@@ -540,6 +542,19 @@ class _DocumentRequestHandler(BaseHTTPRequestHandler):
 
     def _tool_list_documents(self, args: dict) -> None:
         results = self.access_service.list_documents()
+        self._send_json(HTTPStatus.OK, results)
+
+    def _tool_list_expiring_documents(self, args: dict) -> None:
+        try:
+            within_days = int(args.get("within_days", 60))
+        except (TypeError, ValueError):
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {"error": "within_days must be an integer"},
+            )
+            return
+        within_days = min(365, max(1, within_days))
+        results = self.access_service.list_expiring_documents(within_days=within_days)
         self._send_json(HTTPStatus.OK, results)
 
     def _tool_search_documents(self, args: dict) -> None:

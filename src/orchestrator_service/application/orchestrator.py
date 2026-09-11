@@ -179,6 +179,30 @@ class OrchestrationEngine:
     def archive_session(self, session_id: str) -> bool:
         return self._sessions.archive(session_id)
 
+    def list_expiring_documents(self, within_days: int = 30) -> dict:
+        """Documents expiring soon, for the proactive banner (no LLM turn).
+
+        Calls the document service directly. Never raises for transport
+        trouble — the banner simply stays hidden instead.
+        """
+        try:
+            within_days = min(365, max(1, int(within_days)))
+        except (TypeError, ValueError):
+            within_days = 30
+        try:
+            target = self._registry.get_service("list_expiring_documents")
+            if target is None:
+                return {"results": []}
+            result = self._router.call_tool(
+                target, "list_expiring_documents", {"within_days": within_days}
+            )
+            if not isinstance(result, dict) or result.get("error"):
+                return {"results": []}
+            return {"results": result.get("results", [])}
+        except Exception as exc:
+            logger.warning("list_expiring_documents failed: %s", exc)
+            return {"results": []}
+
     def process_message(
         self, session_id: str, user_message: str, file: dict | None = None
     ) -> OrchestratorResponse:

@@ -261,6 +261,28 @@ class DocumentAccessService:
         results = [self._summary_payload(summary) for summary in documents]
         return {"results": results}
 
+    def list_expiring_documents(self, within_days: int = 60) -> dict[str, Any]:
+        """Latest versions expiring within N days — overdue ones included.
+
+        Drives the elderly-friendly expiry banner. Summaries only (safe
+        descriptions, no field values), so no confirmation gate applies.
+        """
+        now = datetime.now(timezone.utc)
+        results = []
+        for summary in self._repository.list_documents():
+            expiry = summary.expiry_date
+            if expiry is None:
+                continue
+            if expiry.tzinfo is None:
+                expiry = expiry.replace(tzinfo=timezone.utc)
+            days_left = (expiry - now).days
+            if days_left <= within_days:
+                payload = self._summary_payload(summary)
+                payload["days_until_expiry"] = days_left
+                results.append(payload)
+        results.sort(key=lambda r: (r["days_until_expiry"], r["document_id"]))
+        return {"results": results}
+
     def search_documents(self, query: str, *, limit: int = 10, requestor: str | None = None) -> dict[str, Any]:
         hits = self._search.search_documents(query, limit=limit)
         results: list[dict[str, Any]] = []

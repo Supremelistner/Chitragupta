@@ -304,6 +304,18 @@ class IngestionService:
                 elif ocr is not None:
                     extracted_text = ocr.extract_text(temp_path)
 
+            # Caller-supplied extraction (e.g. the orchestrator ran the
+            # model service separately and passes the result through
+            # ingestion metadata). Base layer only — fresh live-model
+            # output wins ties in the merge. This also covers the
+            # no-provider path, where classification would otherwise
+            # stay empty and model descriptions would be dropped.
+            seed = request.metadata.get("model_extraction")
+            if isinstance(seed, dict) and seed:
+                classification = _merge_classification(
+                    dict(seed), classification,
+                )
+
             ocr_complete = self._replace_status(
                 ocr_started,
                 status=DocumentProcessingStatus.OCR_COMPLETE,

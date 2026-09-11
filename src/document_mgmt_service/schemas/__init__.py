@@ -148,7 +148,7 @@ CREATE INDEX IF NOT EXISTS idx_doc_rel_type
 )
 
 # ---------------------------------------------------------------------------
-# Migration 004 — Model extraction columns
+# Migration 005 — Owner/relation/summary/expiry + extracted fields
 # ---------------------------------------------------------------------------
 MIGRATION_005 = Migration(
     version=5,
@@ -194,16 +194,18 @@ MIGRATION_004 = Migration(
 -- model_extraction stores the full JSON schema output from the model service.
 -- Derived columns are extracted for indexed queries.
 -- Existing privacy/description/metadata columns remain for backward compatibility.
+-- IF NOT EXISTS (like every other migration here): a crash between the
+-- ALTER and the schema_migrations bookkeeping must be safely retryable.
 
 ALTER TABLE document_versions
-    ADD COLUMN model_extraction     JSONB,
-    ADD COLUMN description_safe     TEXT,
-    ADD COLUMN description_detailed TEXT,
-    ADD COLUMN extraction_confidence REAL,
-    ADD COLUMN document_type        TEXT,
-    ADD COLUMN document_sub_type    TEXT,
-    ADD COLUMN language_primary     TEXT,
-    ADD COLUMN pii_types            JSONB;
+    ADD COLUMN IF NOT EXISTS model_extraction     JSONB,
+    ADD COLUMN IF NOT EXISTS description_safe     TEXT,
+    ADD COLUMN IF NOT EXISTS description_detailed TEXT,
+    ADD COLUMN IF NOT EXISTS extraction_confidence REAL,
+    ADD COLUMN IF NOT EXISTS document_type        TEXT,
+    ADD COLUMN IF NOT EXISTS document_sub_type    TEXT,
+    ADD COLUMN IF NOT EXISTS language_primary     TEXT,
+    ADD COLUMN IF NOT EXISTS pii_types            JSONB;
 
 CREATE INDEX IF NOT EXISTS idx_doc_versions_doc_type
     ON document_versions (document_type);

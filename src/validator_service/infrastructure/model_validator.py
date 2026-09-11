@@ -183,11 +183,26 @@ class ModelValidationAdapter:
                 created_at=datetime.now(timezone.utc),
             )
 
-        # Build result from model output
+        # Build result from model output. Fail CLOSED on schema
+        # violations: the old defaults (authentic=True, risk 0.0) let a
+        # gutted reply like {} validate as genuine.
         latency_ms = (time.monotonic() - start) * 1000
-        is_authentic = parsed.get("is_authentic", True)
-        risk_score = float(parsed.get("risk_score", 0.0))
-        confidence = float(parsed.get("confidence", 0.0))
+        try:
+            is_authentic = parsed["is_authentic"]
+            risk_score = min(1.0, max(0.0, float(parsed["risk_score"])))
+            confidence = min(1.0, max(0.0, float(parsed["confidence"])))
+            if not isinstance(is_authentic, bool):
+                raise TypeError("is_authentic must be a boolean")
+        except (KeyError, TypeError, ValueError) as exc:
+            return ValidationResult(
+                document_id=request.document_id,
+                version=request.version,
+                status=ValidationStatus.ERROR,
+                notes=(f"Model returned schema-violating JSON: {exc}",),
+                latency_ms=latency_ms,
+                request_id=request.request_id,
+                created_at=datetime.now(timezone.utc),
+            )
 
         # Build validation steps
         steps: list[ValidationStep] = []

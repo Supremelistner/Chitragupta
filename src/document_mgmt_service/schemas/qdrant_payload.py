@@ -1,5 +1,14 @@
 """Explicit Qdrant payload schema for document chunk vectors.
 
+.. deprecated::
+    Nothing in production builds payloads through this module anymore;
+    ``QdrantSemanticChunkStoreAdapter._build_payload`` (in
+    ``infrastructure/qdrant.py``) is the canonical builder and has
+    diverged from this schema (encryption markers, ``field_pointers`` /
+    ``owner_type`` / ``relation`` surfacing, ``char_start`` naming).
+    Kept only because ``tests/test_metadata_storage.py`` exercises it.
+    Do NOT treat this file as the contract — read ``_build_payload``.
+
 Qdrant is NOT the canonical document store or authorization authority.
 It holds only what is needed for semantic retrieval:
 

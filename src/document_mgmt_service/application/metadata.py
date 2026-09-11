@@ -95,6 +95,10 @@ def classify_privacy(
         for part in (filename, content_type or "", extracted_text or "", description or "")
         if part
     )
+    # Filenames join words with _/./-: "aadhaar_card.png" is a single
+    # \w+ token, so \b-anchored keyword patterns would never match it.
+    # Normalize separators to spaces before matching.
+    haystack = re.sub(r"[_\-.]+", " ", haystack)
     if _SECRET_RE.search(haystack) or _SENSITIVE_RE.search(haystack):
         return DocumentPrivacyClassification.SENSITIVE
     if _PRIVATE_RE.search(haystack):

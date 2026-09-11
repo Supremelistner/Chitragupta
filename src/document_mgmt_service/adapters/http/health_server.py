@@ -43,6 +43,17 @@ _STATUS_PATH_RE = re.compile(r"^/documents/(?P<document_id>[^/]+)/versions/(?P<v
 _FIELD_CONFIRM_TTL_SECONDS = 300  # 5 minutes
 
 
+class _BadRequest(ValueError):
+    """Raised after a 400 response has already been sent.
+
+    Helpers like :meth:`_required_field` send the error response
+    themselves, then raise this to abort the handler. Callers must
+    catch it and return WITHOUT sending again (a second send corrupts
+    the HTTP stream). Subclasses ValueError so existing
+    ``except ValueError`` guards keep working.
+    """
+
+
 _FIELD_CONFIRM_KEY_CACHE: bytes | None = None
 
 
@@ -91,6 +102,12 @@ def _verify_field_confirm_token(
         padded = token + "=" * (-len(token) % 4)
         raw = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
     except (ValueError, UnicodeDecodeError, base64.binascii.Error):
+        return False
+    # Reject non-canonical encodings: base64 quanta with pad bits admit
+    # multiple spellings of the same bytes, so a mutated token can decode
+    # identically and pass the HMAC check. Re-encoding must round-trip.
+    canonical = base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii").rstrip("=")
+    if not hmac.compare_digest(canonical, token):
         return False
     parts = raw.split(":")
     if len(parts) != 6:
@@ -574,16 +591,20 @@ class _DocumentRequestHandler(BaseHTTPRequestHandler):
         prevents the previous design where any caller could pass
         ``confirm=true`` directly and bypass the gate.
         """
-        document_id = self._required_field(args, "document_id")
         try:
-            version = int(self._required_field(args, "version"))
+            document_id = self._required_field(args, "document_id")
+            version_raw = self._required_field(args, "version")
+            field = self._required_field(args, "field")
+        except _BadRequest:
+            return  # 400 already sent by _required_field
+        try:
+            version = int(version_raw)
         except (TypeError, ValueError):
             self._send_json(
                 HTTPStatus.BAD_REQUEST,
                 {"error": "version must be an integer"},
             )
             return
-        field = self._required_field(args, "field")
         confirmation_token = args.get("confirmation_token") or ""
 
         # If the caller didn't present a valid token, treat the call as the
@@ -608,13 +629,16 @@ class _DocumentRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                 return
             payload = _json_safe(preview)
-            payload["confirmation_token"] = _sign_field_confirm_token(
-                document_id=document_id,
-                version=version,
-                field_name=field,
-                ttl=_FIELD_CONFIRM_TTL_SECONDS,
-            )
-            payload["confirmation_ttl_seconds"] = _FIELD_CONFIRM_TTL_SECONDS
+            # Only a resolvable field gets a token: there is nothing to
+            # confirm for a miss, and minting one invites confused retries.
+            if preview.status == "requires_confirmation":
+                payload["confirmation_token"] = _sign_field_confirm_token(
+                    document_id=document_id,
+                    version=version,
+                    field_name=field,
+                    ttl=_FIELD_CONFIRM_TTL_SECONDS,
+                )
+                payload["confirmation_ttl_seconds"] = _FIELD_CONFIRM_TTL_SECONDS
             self._send_json(HTTPStatus.OK, payload)
             return
 
@@ -715,14 +739,14 @@ class _DocumentRequestHandler(BaseHTTPRequestHandler):
         q = payload.get("query")
         if not q or not str(q).strip():
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": "query is required"})
-            raise ValueError("query required")
+            raise _BadRequest("query required")
         return str(q)
 
     def _required_field(self, payload: dict, name: str):
         v = payload.get(name)
         if v is None or v == "":
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": f"{name} is required"})
-            raise ValueError(f"{name} required")
+            raise _BadRequest(f"{name} required")
         return v
 
     def _first_context(self, payload: dict) -> str | None:

@@ -289,7 +289,8 @@ class QdrantSemanticChunkStoreAdapter(SemanticChunkStore):
         upload_date = chunk.created_at.isoformat() if chunk.created_at else ""
         return encrypt_payload(
             payload,
-            description=chunk.description or "",
+            document_id=chunk.document_id,
+            version=chunk.version,
             upload_date=upload_date,
             master_key=self._encryption_key,
         )

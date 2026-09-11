@@ -37,11 +37,37 @@ _PLAINTEXT_FIELDS = frozenset({
 })
 
 
+def derive_document_key(
+    *,
+    document_id: str,
+    version: int,
+    upload_date: str,
+    master_key: str,
+) -> bytes:
+    """Derive a Fernet-compatible data key without PII inputs (scheme v2).
+
+    Key = HMAC-SHA256(key=master_key, msg="chitragupta-qdrant-v2|{doc}|{ver}|{date}").
+    ``document_id`` is a random UUID, so — unlike the legacy
+    description-derived scheme — the derivation inputs carry no PII and
+    need no plaintext hint stored alongside the ciphertext.
+    """
+    import base64
+    message = f"chitragupta-qdrant-v2|{document_id}|{version}|{upload_date}".encode("utf-8")
+    raw_key = hmac.new(
+        key=master_key.encode("utf-8"),
+        msg=message,
+        digestmod=hashlib.sha256,
+    ).digest()
+    return base64.urlsafe_b64encode(raw_key)
+
+
 def derive_encryption_key(
     description: str,
     upload_date: str,
     master_key: str,
 ) -> bytes:
+    """Legacy (v1) derivation — description-based. Kept ONLY to decrypt
+    points written before the v2 scheme. Do not use for new writes."""
     """Derive a Fernet-compatible encryption key from document metadata.
 
     Args:
@@ -67,23 +93,29 @@ def derive_encryption_key(
 
 def encrypt_payload(
     payload: dict[str, Any],
-    description: str,
+    document_id: str,
+    version: int,
     upload_date: str,
     master_key: str,
 ) -> dict[str, Any]:
-    """Encrypt sensitive fields in a Qdrant payload.
+    """Encrypt sensitive fields in a Qdrant payload (scheme v2).
 
     Returns a new dict with:
     - Sensitive fields encrypted as base64 strings (prefixed with "enc:")
     - Plaintext fields passed through unchanged
-    - A plaintext `_enc_desc` hint stored for key derivation on decrypt
+    - A non-sensitive `_enc_date` hint + `_enc_v` scheme marker. No
+      description (or any PII) is stored — the key re-derives from
+      document_id/version/date already present in the payload.
     """
     if not master_key:
         return payload  # No encryption configured
 
     from cryptography.fernet import Fernet
 
-    key = derive_encryption_key(description, upload_date, master_key)
+    key = derive_document_key(
+        document_id=document_id, version=version,
+        upload_date=upload_date, master_key=master_key,
+    )
     fernet = Fernet(key)
 
     encrypted = {}
@@ -98,9 +130,9 @@ def encrypt_payload(
         else:
             encrypted[field] = value
 
-    # Store plaintext hints for key derivation during decryption
-    encrypted["_enc_desc"] = description
+    # Non-sensitive hints for key re-derivation during decryption.
     encrypted["_enc_date"] = upload_date
+    encrypted["_enc_v"] = 2
 
     logger.debug(
         "Encrypted %d fields for chunk %s",
@@ -125,10 +157,20 @@ def decrypt_payload(
     if not master_key:
         return payload  # No encryption configured
 
-    from cryptography.fernet import Fernet, InvalidToken
+    from cryptography.fernet import Fernet
 
     key = derive_encryption_key(description, upload_date, master_key)
-    fernet = Fernet(key)
+    result = _decrypt_with_key(payload, Fernet(key))
+    # Remove internal hints
+    result.pop("_enc_desc", None)
+    result.pop("_enc_date", None)
+    result.pop("_enc_v", None)
+    return result
+
+
+def _decrypt_with_key(payload: dict[str, Any], fernet) -> dict[str, Any]:  # type: ignore[no-untyped-def]
+    """Decrypt every ``enc:``-prefixed field with an already-built Fernet."""
+    from cryptography.fernet import InvalidToken
 
     decrypted = {}
     for field, value in payload.items():
@@ -151,10 +193,6 @@ def decrypt_payload(
                 decrypted[field] = value
         else:
             decrypted[field] = value
-
-    # Remove internal hints
-    decrypted.pop("_enc_desc", None)
-    decrypted.pop("_enc_date", None)
     return decrypted
 
 
@@ -162,19 +200,37 @@ def decrypt_payload_with_date(
     payload: dict[str, Any],
     master_key: str,
 ) -> dict[str, Any]:
-    """Decrypt using the created_at field and _enc_desc hint from the payload.
+    """Decrypt a payload using only data carried in the payload itself.
 
-    Used during search results where we don't have the original upload date.
-    The _enc_desc hint stores the original description used for key derivation.
-    Falls back to empty strings if fields are missing.
+    Scheme v2 (``_enc_v == 2``): re-derives the key from the payload's own
+    document_id/version plus ``_enc_date`` (or ``created_at``). No PII hint
+    needed. Legacy v1 points (with a plaintext ``_enc_desc`` hint) fall
+    back to description-derived decryption so old data keeps working.
+    Falls back to returning the payload as-is when nothing matches.
     """
     if not master_key:
         return payload
 
-    upload_date = payload.get("_enc_date", "") or payload.get("created_at", "") or ""
-    description = payload.get("_enc_desc", "") or ""
+    from cryptography.fernet import Fernet
 
-    result = decrypt_payload(payload, description, upload_date, master_key)
-    # Remove the internal hint from the result
+    upload_date = payload.get("_enc_date", "") or payload.get("created_at", "") or ""
+    if payload.get("_enc_v") == 2:
+        key = derive_document_key(
+            document_id=str(payload.get("document_id", "")),
+            version=int(payload.get("version", 0) or 0),
+            upload_date=upload_date,
+            master_key=master_key,
+        )
+        result = _decrypt_with_key(payload, Fernet(key))
+    elif payload.get("_enc_desc"):
+        # Legacy v1 point: description hint still present.
+        description = payload.get("_enc_desc", "") or ""
+        key = derive_encryption_key(description, upload_date, master_key)
+        result = _decrypt_with_key(payload, Fernet(key))
+    else:
+        return payload
+    # Remove internal hints from the result
     result.pop("_enc_desc", None)
+    result.pop("_enc_date", None)
+    result.pop("_enc_v", None)
     return result

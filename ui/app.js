@@ -224,9 +224,11 @@
 
     function formatRelativeTime(iso) {
         if (!iso) return '';
-        const t = new Date(iso).getTime();
-        if (Number.isNaN(t)) return '';
-        const diffSec = Math.max(0, Math.floor((Date.now() - t) / 1000));
+        // NOTE: do not name this `t` — it would shadow the i18n `t()`
+        // helper used below (that shadowing once blanked the sidebar).
+        const ts = new Date(iso).getTime();
+        if (Number.isNaN(ts)) return '';
+        const diffSec = Math.max(0, Math.floor((Date.now() - ts) / 1000));
         if (diffSec < 60) return t('session_just_now');
         if (diffSec < 3600) return t('session_minutes_ago', { n: Math.floor(diffSec / 60) });
         if (diffSec < 86400) return t('session_hours_ago', { n: Math.floor(diffSec / 3600) });

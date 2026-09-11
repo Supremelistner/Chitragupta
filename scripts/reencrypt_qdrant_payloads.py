@@ -127,28 +127,66 @@ def main() -> int:
         print("ENCRYPTION_MASTER_KEY is not set; refusing to run.", file=sys.stderr)
         return 2
 
-    scanned = migrated = skipped = 0
+    scanned = migrated = cleaned = skipped = 0
     to_write: list[tuple] = []
+    to_clean: list = []
     for point in _scroll_points(args.qdrant_url, args.collection, args.filter_document_id):
         scanned += 1
-        new_payload = _transform_payload(dict(point.get("payload", {})), master_key)
-        if new_payload is None:
+        payload = dict(point.get("payload", {}))
+        new_payload = _transform_payload(payload, master_key)
+        if new_payload is not None:
+            migrated += 1
+            to_write.append((point["id"], new_payload))
+        elif "_enc_desc" in payload:
+            # Already v2 (or undecryptable) but still carrying the legacy
+            # hint — just drop the key, no re-encryption needed.
+            cleaned += 1
+            to_clean.append(point["id"])
+        else:
             skipped += 1
-            continue
-        migrated += 1
-        to_write.append((point["id"], new_payload))
 
-    print(f"scanned={scanned} need_rewrite={migrated} skipped_or_ok={skipped}")
+    print(f"scanned={scanned} need_rewrite={migrated} need_hint_drop={cleaned} ok={skipped}")
     if not args.apply:
         print("dry run: no writes performed (pass --apply to write)")
         return 0
     for point_id, new_payload in to_write:
+        # Qdrant SetPayload operation: {"payload": {...}, "points": [...]}.
         _qdrant_post(args.qdrant_url, f"/collections/{args.collection}/points/payload", {
+            "payload": new_payload,
             "points": [point_id],
-            "set_payload": new_payload,
         })
-    print(f"rewrote {len(to_write)} point(s)")
+        # SetPayload MERGES: explicitly delete the legacy hint key.
+        _delete_payload_keys(args.qdrant_url, args.collection, [point_id], ["_enc_desc"])
+    if to_clean:
+        _delete_payload_keys(args.qdrant_url, args.collection, to_clean, ["_enc_desc"])
+    print(f"rewrote {len(to_write)} point(s), dropped hint on {len(to_clean)} point(s)")
     return 0
+
+
+def _delete_payload_keys(base_url: str, collection: str, point_ids: list, keys: list) -> None:
+    """Delete specific payload keys via Qdrant's DeletePayload operation."""
+    import urllib.error
+    req = urllib.request.Request(
+        base_url.rstrip("/") + f"/collections/{collection}/points/payload/delete",
+        data=json.dumps({"keys": keys, "points": point_ids}).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60):
+            pass
+    except urllib.error.HTTPError as exc:
+        # Older Qdrant builds expose delete as DELETE on /points/payload.
+        if exc.code not in (404, 405):
+            raise
+        req = urllib.request.Request(
+            base_url.rstrip("/") + f"/collections/{collection}/points/payload",
+            data=json.dumps({"keys": keys, "points": point_ids}).encode(),
+            headers={"Content-Type": "application/json"},
+            method="DELETE",
+        )
+        with urllib.request.urlopen(req, timeout=60):
+            pass
 
 
 if __name__ == "__main__":

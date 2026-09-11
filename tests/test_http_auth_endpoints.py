@@ -51,6 +51,11 @@ def _build_app(auth_dir: str):
             return LLMResponse(content="ok", tool_calls=[])
 
     config = OrchestratorConfig.from_env()
+    # Hermetic: never touch ambient live services from unit tests —
+    # point the forwarder at a closed port so uploads deterministically
+    # 503 instead of ingesting into the developer's live DB.
+    import dataclasses
+    config = dataclasses.replace(config, document_service_url="http://127.0.0.1:9")
     mock_client = MagicMock()
     mock_client.call_tool.return_value = {"results": []}
     router = ServiceClientRouter({ServiceTarget.DOCUMENT: mock_client})

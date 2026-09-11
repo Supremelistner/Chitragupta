@@ -81,6 +81,8 @@ docker compose up -d
 # 2. Copy and edit .env (see .env.example for the full set of variables)
 cp .env.example .env
 # Then add your HUGGINGFACE_TOKEN and GROQ_API_KEY.
+# For multi-user login, also set a long random CHITRAGUPTA_JWT_SECRET:
+#   python -c "import secrets; print(secrets.token_hex(32))"
 
 # 3. Start all services in the background
 python activate.py --bg
@@ -132,6 +134,45 @@ The two most important:
 - `ENCRYPTION_MASTER_KEY` — Used to derive per-document Fernet keys for
   Qdrant payload encryption. Changing it invalidates all existing
   encrypted data.
+- `CHITRAGUPTA_JWT_SECRET` — Signs multi-user login tokens (email +
+  password → JWT, 7-day TTL with sliding refresh). Required for
+  `/api/auth/*`; use a long random string. Must match on every
+  instance that verifies logins.
+
+## Multi-user and device sync (local-primary)
+
+Each login owns its documents end to end: Postgres rows and Qdrant
+points carry a `user_id` (migration 006 backfills old rows as
+`__local__`), Qdrant payloads encrypt under a per-user key domain, and
+all list/search calls are tenant-filtered.
+
+```bash
+# Register, then log in (UI login screen calls the same endpoints)
+curl -X POST http://127.0.0.1:8084/api/auth/register \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"you@example.com","password":"at-least-8-chars"}'
+# → {"user_id": "...", "token": "<JWT>"}
+
+# Authenticated calls carry the token; uploads without one fall back
+# to the legacy __local__ owner so old clients keep working
+curl http://127.0.0.1:8084/api/me -H "Authorization: Bearer <JWT>"
+```
+
+Device backup/sync is docs-only (chat sessions never leave the device):
+
+- Uploads push gzipped blobs + a manifest entry to the filesystem hub
+  at `data/global-blobs/<user_id>/` (Docker phase; same interface will
+  target shared Postgres/Qdrant in production via `GLOBAL_POSTGRES_DSN`
+  / `GLOBAL_QDRANT_URL`).
+- Switching users wipes the device cache (`POST /api/auth/logout`
+  with `{"wipe": true}`) and pulls from scratch:
+  `POST /api/sync/pull` to list, `POST /api/sync/restore` for a
+  version-preserving restore (same document IDs + versions).
+
+Runtime data paths (services run with cwd `src/`, so relative paths
+resolve there): sessions/confirmations/users under `src/data/`;
+file blobs under `data/files/`; the sync hub under `data/global-blobs/`
+(absolute, cwd-independent).
 
 ### Chat LLM notes (Gemini function calling)
 

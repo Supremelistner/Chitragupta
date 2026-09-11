@@ -118,6 +118,7 @@ class FileSessionStore:
                     "status": tc.status.value,
                     "result": tc.result,
                     "error": tc.error,
+                    "thought_signature": getattr(tc, "thought_signature", None),
                 }
                 for tc in msg.tool_calls
             ],
@@ -148,6 +149,7 @@ class FileSessionStore:
                         status=ToolCallStatus(tc_data.get("status", "pending")),
                         result=tc_data.get("result"),
                         error=tc_data.get("error"),
+                        thought_signature=tc_data.get("thought_signature"),
                     )
                 )
             msg = ConversationMessage(

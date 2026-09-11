@@ -64,11 +64,13 @@ ingested, the chunk payload looks like:
 }
 ```
 
-`text`, `description`, and `metadata` are encrypted with a key derived
-from `ENCRYPTION_MASTER_KEY` + per-document `description` + upload date.
-The plaintext `field_pointers` and `owner_type` are filterable so you can
-search "all my mother's documents" or "all docs that have an aadhaar
-number" without ever exposing the value at the vector layer.
+`text`, `description`, `metadata`, and `original_filename` are encrypted
+with a per-document key derived from `ENCRYPTION_MASTER_KEY` + document ID
++ version + upload date (scheme v2 — no description text is stored
+alongside the ciphertext). The plaintext `field_pointers` and
+`owner_type` are filterable so you can search "all my mother's documents"
+or "all docs that have an aadhaar number" without ever exposing the value
+at the vector layer.
 
 ## Quick start
 
@@ -130,6 +132,18 @@ The two most important:
 - `ENCRYPTION_MASTER_KEY` — Used to derive per-document Fernet keys for
   Qdrant payload encryption. Changing it invalidates all existing
   encrypted data.
+
+### Chat LLM notes (Gemini function calling)
+
+Gemini 2.5+ models attach an opaque `thoughtSignature` to every function
+call and reject follow-up turns that replay the call without it (`400
+INVALID_ARGUMENT`). The orchestrator therefore persists each call's
+signature on the `ToolCall` record (including across restarts via the
+session and confirmation stores) and replays it verbatim in the
+conversation history. If the specific `thought_signature` 400 still
+occurs (e.g. sessions stored before this behavior existed), the provider
+retries once with prior function calls stripped from history. Qwen/Groq
+use OpenAI-style APIs and are unaffected.
 
 ## Privacy and redaction guarantees
 

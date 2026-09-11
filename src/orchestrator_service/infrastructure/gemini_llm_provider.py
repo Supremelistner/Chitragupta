@@ -6,6 +6,7 @@ be slotted in next to QwenLLMProvider (HuggingFace) and GroqLLMProvider.
 """
 from __future__ import annotations
 
+import base64 as _b64
 import json as _json
 import logging
 from typing import Any
@@ -114,40 +115,18 @@ def _openai_tools_to_gemini(tools: list[dict[str, Any]]) -> list[Any] | None:
     if not decls:
         return None
     return [_gtypes.Tool(function_declarations=decls)]
-def _openai_tools_to_gemini(tools: list[dict[str, Any]]) -> list[Any] | None:
-    """Convert OpenAI-style `tools=[{"type": "function", "function": {...}}]`
-    into a list of `google.genai.types.Tool` with function_declarations.
-    """
-    if not tools:
-        return None
-    try:
-        from google.genai import types as _gtypes
-    except ImportError:
-        return None
 
-    decls: list[Any] = []
-    for tool in tools:
-        if not isinstance(tool, dict):
-            continue
-        fn = tool.get("function") or {}
-        name = fn.get("name")
-        if not name:
-            continue
-        parameters = _openai_schema_to_gemini(fn.get("parameters"))
-        decls.append(
-            _gtypes.FunctionDeclaration(
-                name=name,
-                description=fn.get("description", ""),
-                parameters=parameters,
-            )
-        )
-    if not decls:
-        return None
-    return [_gtypes.Tool(function_declarations=decls)]
+
+def _is_thought_signature_error(exc: BaseException) -> bool:
+    """True iff this looks like the missing-thought_signature 400."""
+    text = f"{exc.__class__.__name__}: {exc}".lower()
+    return "thought_signature" in text or "thought signature" in text
 
 
 def _domain_messages_to_gemini_contents(
     messages: list[ConversationMessage],
+    *,
+    strip_function_calls: bool = False,
 ) -> tuple[str | None, list[Any]]:
     """Convert the orchestrator's ConversationMessage list to Gemini's
     `(system_instruction, contents)` pair.
@@ -156,6 +135,11 @@ def _domain_messages_to_gemini_contents(
     merge consecutive same-role messages; tool results become a synthetic
     "user" message that includes the function-response part so the model
     can continue the conversation.
+
+    ``strip_function_calls`` drops prior model function calls (and the now
+    orphaned tool-result messages) for the degraded one-time retry after a
+    thought_signature 400 — used for sessions stored before signatures
+    were persisted.
     """
     try:
         from google.genai import types as _gtypes
@@ -179,24 +163,40 @@ def _domain_messages_to_gemini_contents(
             parts: list[Any] = []
             if msg.content:
                 parts.append(_gtypes.Part(text=msg.content))
-            for tc in (msg.tool_calls or []):
+            tool_calls = [] if strip_function_calls else (msg.tool_calls or [])
+            for tc in tool_calls:
                 args = tc.arguments
                 if isinstance(args, str):
                     try:
                         args = _json.loads(args)
                     except _json.JSONDecodeError:
                         args = {}
-                parts.append(
-                    _gtypes.Part(
-                        function_call=_gtypes.FunctionCall(
-                            name=tc.tool_name,
-                            args=args if isinstance(args, dict) else {},
+                fc_kwargs: dict[str, Any] = {
+                    "name": tc.tool_name,
+                    "args": args if isinstance(args, dict) else {},
+                }
+                part_kwargs: dict[str, Any] = {"function_call": _gtypes.FunctionCall(**fc_kwargs)}
+                # Replay the model's thought signature verbatim: Gemini 2.5+
+                # rejects follow-up turns that echo a function call without
+                # it (400 INVALID_ARGUMENT). Stored base64, sent as bytes.
+                sig_b64 = getattr(tc, "thought_signature", None)
+                if isinstance(sig_b64, str) and sig_b64:
+                    try:
+                        part_kwargs["thought_signature"] = _b64.b64decode(
+                            sig_b64.encode("ascii")
                         )
-                    )
-                )
+                    except (ValueError, _b64.binascii.Error):
+                        logger.warning(
+                            "Dropping undecodable thought_signature for %s",
+                            tc.tool_name,
+                        )
+                parts.append(_gtypes.Part(**part_kwargs))
             if parts:
                 raw_contents.append({"role": "model", "parts": parts})
         elif msg.role == MessageRole.TOOL:
+            if strip_function_calls:
+                # Would dangle without its function call — drop it.
+                continue
             content = msg.content
             if not content and msg.metadata.get("result") is not None:
                 content = _json.dumps(msg.metadata["result"], default=str)
@@ -255,6 +255,16 @@ def _gemini_response_to_llm(response: Any, fallback_model: str) -> LLMResponse:
                         args_str = "{}"
                 else:
                     args_str = args
+                # Preserve Gemini's opaque thought signature (bytes) as
+                # base64 text. Dropping it makes the NEXT turn fail: the
+                # API rejects replayed function calls without it
+                # (400 INVALID_ARGUMENT).
+                sig = getattr(part, "thought_signature", None)
+                sig_b64 = (
+                    _b64.b64encode(sig).decode("ascii")
+                    if isinstance(sig, (bytes, bytearray)) and sig
+                    else None
+                )
                 tool_calls.append({
                     "id": f"call_{len(tool_calls)+1}",
                     "type": "function",
@@ -262,6 +272,7 @@ def _gemini_response_to_llm(response: Any, fallback_model: str) -> LLMResponse:
                         "name": getattr(fc, "name", ""),
                         "arguments": args_str,
                     },
+                    "thought_signature": sig_b64,
                 })
 
     usage = None
@@ -362,6 +373,26 @@ class GeminiLLMProvider(LLMProvider):
             )
             return _gemini_response_to_llm(response, self._model_id)
         except Exception as exc:
+            if _is_thought_signature_error(exc):
+                # Pre-fix sessions replay signature-less calls. Retry once
+                # with prior function calls (and orphaned results) stripped;
+                # reduced context beats a hard failure for the user.
+                logger.warning(
+                    "thought_signature 400 — retrying once without prior "
+                    "function calls"
+                )
+                try:
+                    _, stripped = _domain_messages_to_gemini_contents(
+                        messages, strip_function_calls=True
+                    )
+                    response = client.models.generate_content(
+                        model=self._model_id,
+                        contents=stripped,
+                        config=config,
+                    )
+                    return _gemini_response_to_llm(response, self._model_id)
+                except Exception as retry_exc:
+                    exc = retry_exc
             logger.exception("Gemini LLM inference failed")
             return LLMResponse(
                 content=f"Error: {exc}",

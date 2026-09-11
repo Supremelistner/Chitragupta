@@ -143,6 +143,7 @@ class FileConfirmationStore:
             "approved": request.approved,
             "correction": getattr(request, "correction", None),
             "tool_call_id": getattr(request, "tool_call_id", None),
+            "thought_signature": getattr(request, "thought_signature", None),
         }
 
     def _deserialize(self, data: dict[str, Any]) -> ConfirmationRequest:
@@ -163,4 +164,6 @@ class FileConfirmationStore:
             req.correction = data["correction"]
         if data.get("tool_call_id"):
             req.tool_call_id = data["tool_call_id"]
+        if data.get("thought_signature"):
+            req.thought_signature = data["thought_signature"]
         return req

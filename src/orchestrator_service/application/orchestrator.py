@@ -737,6 +737,7 @@ class OrchestrationEngine:
                 call_id=tc_data.get("id", ""),
                 tool_name=func.get("name", ""),
                 arguments=self._parse_arguments(func.get("arguments", "{}")),
+                thought_signature=tc_data.get("thought_signature"),
             )
             assistant_tc.append(tool_call)
 
@@ -780,6 +781,7 @@ class OrchestrationEngine:
                             message=self._confirmation_message(
                                 confirm_type, tool_call.tool_name, tool_call.arguments
                             ),
+                            thought_signature=tool_call.thought_signature,
                         )
                         self._confirmations.save(confirmation)
                         self._sessions.save(session)
@@ -890,6 +892,7 @@ class OrchestrationEngine:
             arguments={
                 k: v for k, v in confirmation.tool_args.items() if k != "call_id"
             },
+            thought_signature=confirmation.thought_signature,
         )
         target = self._registry.get_service(tool_call.tool_name)
 

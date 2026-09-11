@@ -143,6 +143,11 @@ class ToolCall:
     service: ServiceTarget | None = None
     latency_ms: float = 0.0
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    # Gemini 2.5+ attaches an opaque thought signature to function calls;
+    # the API rejects follow-up turns that replay the call without it
+    # (400 INVALID_ARGUMENT). Stored base64-encoded (bytes on the wire)
+    # so session files stay JSON-safe. None when the provider gave none.
+    thought_signature: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +169,9 @@ class ConfirmationRequest:
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     responded: bool = False
     approved: bool = False
+    # Carried through the approval gate so the post-approval followup can
+    # replay the original function call verbatim (Gemini thought_signature).
+    thought_signature: str | None = None
 
 
 # ---------------------------------------------------------------------------

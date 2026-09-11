@@ -9,6 +9,7 @@ Covers:
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import shutil
@@ -1021,6 +1022,247 @@ class TestGeminiLLMProvider(unittest.TestCase):
         h = provider.health()
         self.assertEqual(h["status"], "healthy")
         self.assertEqual(h["provider"], "gemini")
+
+
+class TestGeminiThoughtSignature(unittest.TestCase):
+    """Gemini 2.5+ requires replayed function calls to carry their
+    thought_signature, else follow-up turns fail with 400
+    INVALID_ARGUMENT. These tests pin the capture → persist → replay
+    chain plus the one-time degraded retry."""
+
+    def _make_provider(self):
+        from orchestrator_service.infrastructure.gemini_llm_provider import (
+            GeminiLLMProvider,
+        )
+        return GeminiLLMProvider(api_key="test-key", model_id="gemini-2.5-flash-lite")
+
+    def _install_fake_client(self, provider, fake_models):
+        class _Client:
+            pass
+        c = _Client()
+        c.models = fake_models
+        provider._client = c
+        return c
+
+    def _fc_response(self, sig=b"opaque-sig-bytes"):
+        class _FC:
+            name = "get_field_value"
+            args = {"document_id": "d1", "version": 1, "field": "aadhaar_number"}
+
+        class _Part:
+            def __init__(self):
+                self.text = None
+                self.function_call = _FC()
+                self.thought_signature = sig
+
+        class _Content:
+            parts = [_Part()]
+
+        class _Candidate:
+            content = _Content()
+
+        class _Response:
+            candidates = [_Candidate()]
+            usage_metadata = None
+            model = "gemini-2.5-flash-lite"
+
+        return _Response()
+
+    def _text_response(self, text="done"):
+        class _Part:
+            def __init__(self):
+                self.text = text
+                self.function_call = None
+
+        class _Content:
+            parts = [_Part()]
+
+        class _Candidate:
+            content = _Content()
+
+        class _Response:
+            candidates = [_Candidate()]
+            usage_metadata = None
+            model = "gemini-2.5-flash-lite"
+
+        return _Response()
+
+    def test_capture_thought_signature(self):
+        from orchestrator_service.infrastructure.gemini_llm_provider import (
+            _gemini_response_to_llm,
+        )
+        resp = _gemini_response_to_llm(self._fc_response(), "m")
+        self.assertEqual(len(resp.tool_calls), 1)
+        self.assertEqual(
+            resp.tool_calls[0]["thought_signature"],
+            base64.b64encode(b"opaque-sig-bytes").decode("ascii"),
+        )
+
+    def test_missing_signature_captures_none(self):
+        from orchestrator_service.infrastructure.gemini_llm_provider import (
+            _gemini_response_to_llm,
+        )
+
+        class _FC:
+            name = "get_field_value"
+            args = {}
+
+        class _Part:
+            text = None
+            function_call = _FC()
+            # no thought_signature attribute at all
+
+        class _Content:
+            parts = [_Part()]
+
+        class _Candidate:
+            content = _Content()
+
+        class _Response:
+            candidates = [_Candidate()]
+            usage_metadata = None
+            model = "m"
+
+        resp = _gemini_response_to_llm(_Response(), "m")
+        self.assertIsNone(resp.tool_calls[0]["thought_signature"])
+
+    def test_history_replays_signature(self):
+        from orchestrator_service.domain.models import MessageRole, ToolCall
+        from orchestrator_service.infrastructure.gemini_llm_provider import (
+            _domain_messages_to_gemini_contents,
+        )
+        sig_b64 = base64.b64encode(b"opaque-sig-bytes").decode("ascii")
+        messages = [
+            ConversationMessage(role=MessageRole.USER, content="show number"),
+            ConversationMessage(
+                role=MessageRole.ASSISTANT,
+                content="",
+                tool_calls=[ToolCall(
+                    call_id="c1", tool_name="get_field_value",
+                    arguments={"field": "aadhaar_number"},
+                    thought_signature=sig_b64,
+                )],
+            ),
+        ]
+        _, contents = _domain_messages_to_gemini_contents(messages)
+        model_parts = [
+            p for c in contents if c.role == "model" for p in c.parts
+        ]
+        fc_parts = [p for p in model_parts if p.function_call is not None]
+        self.assertEqual(len(fc_parts), 1)
+        self.assertEqual(fc_parts[0].thought_signature, b"opaque-sig-bytes")
+
+    def test_strip_function_calls(self):
+        from orchestrator_service.domain.models import MessageRole, ToolCall
+        from orchestrator_service.infrastructure.gemini_llm_provider import (
+            _domain_messages_to_gemini_contents,
+        )
+        messages = [
+            ConversationMessage(role=MessageRole.USER, content="show number"),
+            ConversationMessage(
+                role=MessageRole.ASSISTANT, content="",
+                tool_calls=[ToolCall(call_id="c1", tool_name="get_field_value")],
+            ),
+            ConversationMessage(
+                role=MessageRole.TOOL, content='{"status": "ok"}',
+                tool_call_id="c1",
+            ),
+        ]
+        _, contents = _domain_messages_to_gemini_contents(
+            messages, strip_function_calls=True
+        )
+        for content in contents:
+            for part in content.parts:
+                # getattr: the test-suite genai stub only sets attrs that
+                # were explicitly passed to the constructor.
+                self.assertIsNone(getattr(part, "function_call", None))
+                self.assertIsNone(getattr(part, "function_response", None))
+
+    def test_retry_on_thought_signature_400(self):
+        calls = {"n": 0}
+        ok_response = self._text_response()
+
+        class _Models:
+            def generate_content(self, *, model, contents, config):
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    raise Exception(
+                        "400 INVALID_ARGUMENT. {'error': {'message': "
+                        "'Function call is missing a thought_signature'}}"
+                    )
+                return ok_response
+
+        provider = self._make_provider()
+        self._install_fake_client(provider, _Models())
+        resp = provider.chat([ConversationMessage(role=MessageRole.USER, content="hi")])
+        self.assertEqual(calls["n"], 2)
+        self.assertEqual(resp.content, "done")
+
+    def test_no_retry_on_other_errors(self):
+        calls = {"n": 0}
+
+        class _Models:
+            def generate_content(self, *, model, contents, config):
+                calls["n"] += 1
+                raise ValueError("boom")
+
+        provider = self._make_provider()
+        self._install_fake_client(provider, _Models())
+        resp = provider.chat([ConversationMessage(role=MessageRole.USER, content="hi")])
+        self.assertEqual(calls["n"], 1)
+        self.assertTrue(resp.content.startswith("Error:"))
+
+    def test_session_store_round_trip(self):
+        import tempfile
+        from orchestrator_service.domain.models import (
+            MessageRole, ToolCall, ToolCallStatus,
+        )
+        from orchestrator_service.infrastructure.session_store import (
+            FileSessionStore,
+        )
+        tmp = tempfile.mkdtemp()
+        try:
+            store = FileSessionStore(base_dir=tmp)
+            session = self._session_with_call()
+            store.save(session)
+            loaded = store.get(session.session_id)
+            self.assertIsNotNone(loaded)
+            assert loaded is not None
+            tcs = loaded.messages[0].tool_calls
+            self.assertEqual(len(tcs), 1)
+            self.assertEqual(
+                tcs[0].thought_signature,
+                base64.b64encode(b"opaque-sig-bytes").decode("ascii"),
+            )
+            self.assertEqual(tcs[0].status, ToolCallStatus.PENDING)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def _session_with_call(self):
+        from orchestrator_service.domain.models import (
+            MessageRole, Session, ToolCall,
+        )
+        session = Session(user_id="u", title="t")
+        session.messages.append(ConversationMessage(
+            role=MessageRole.ASSISTANT,
+            content="",
+            tool_calls=[ToolCall(
+                call_id="c1", tool_name="get_field_value",
+                thought_signature=base64.b64encode(b"opaque-sig-bytes").decode("ascii"),
+            )],
+        ))
+        return session
+
+    def test_is_thought_signature_error(self):
+        from orchestrator_service.infrastructure.gemini_llm_provider import (
+            _is_thought_signature_error,
+        )
+        self.assertTrue(_is_thought_signature_error(
+            Exception("400 INVALID_ARGUMENT: missing a thought_signature")))
+        self.assertTrue(_is_thought_signature_error(
+            Exception("missing a thought signature in parts")))
+        self.assertFalse(_is_thought_signature_error(ValueError("boom")))
+        self.assertFalse(_is_thought_signature_error(Exception("429 rate limit")))
 
 
 class TestDomainModels(unittest.TestCase):

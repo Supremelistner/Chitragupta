@@ -79,6 +79,11 @@ class HuggingFaceProviderAdapter(ModelProvider):
         except Exception as exc:
             latency_ms = (time.monotonic() - start) * 1000
             logger.exception("HuggingFace inference failed")
+            from model_service.domain.models import http_status_from_exception
+            error_meta: dict[str, object] = {"error": str(exc)}
+            http_status = http_status_from_exception(exc)
+            if http_status is not None:
+                error_meta["http_status"] = http_status
             return InferenceResult(
                 task=request.task,
                 provider=self.provider_type,
@@ -86,7 +91,7 @@ class HuggingFaceProviderAdapter(ModelProvider):
                 output=f"ERROR: {exc}",
                 latency_ms=latency_ms,
                 request_id=request.request_id,
-                metadata={"error": str(exc)},
+                metadata=error_meta,
             )
 
     def _call_inference(self, request: InferenceRequest) -> tuple[str, dict[str, int] | None]:

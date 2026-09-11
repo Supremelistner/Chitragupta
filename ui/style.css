@@ -786,6 +786,16 @@ body {
     .modal-card { padding: 32px 24px; }
 }
 
+/* Reduced motion: disable pulses, fades, and slides for users who
+   ask for it. Layout and visibility are unchanged. */
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+    }
+}
+
 /* The HTML5 ``hidden`` attribute uses display:none, but our explicit
    display:flex rules for .modal / .drawer / .confirm-pill / .upload-strip
    would otherwise override it. Force them back to none when hidden. */

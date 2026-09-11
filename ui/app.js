@@ -206,7 +206,18 @@
 
             item.appendChild(title);
             item.appendChild(time);
-            item.addEventListener('click', () => selectSession(s.session_id));
+            // Keyboard access: session rows are divs, so expose them
+            // to Tab and activate on Enter/Space like a button.
+            item.tabIndex = 0;
+            item.setAttribute('aria-label', s.title || t('nav_new_chat'));
+            const activate = () => selectSession(s.session_id);
+            item.addEventListener('click', activate);
+            item.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    activate();
+                }
+            });
             els.sessionList.appendChild(item);
         }
     }
@@ -272,9 +283,15 @@
 
     // ─── Language switch ──────────────────────────────────────
     function setLanguageSwitchActive(code) {
-        for (const [el, codeExpected] of [[els.langHi, 'hi'], [els.langEn, 'en']]) {
+        // Only hi/en have chips (ta/bn have backend translation but no
+        // shipped string tables, so their chrome falls back to English).
+        // Highlight EN in that case so the switch always reflects the
+        // language the chrome is actually rendered in.
+        const chips = [[els.langHi, 'hi'], [els.langEn, 'en']];
+        const effective = chips.some(([, c]) => c === code) ? code : 'en';
+        for (const [el, codeExpected] of chips) {
             if (!el) continue;
-            el.classList.toggle('active', code === codeExpected);
+            el.classList.toggle('active', effective === codeExpected);
         }
     }
 
@@ -521,7 +538,10 @@
                     const messageId = 'msg-' + Date.now();
                     appendMessage('assistant', data.message, messageId);
                 }
-                await refreshSessionList();
+                // No session-list refetch here: the backend never retitles
+                // or reorders on new messages, and the session was already
+                // listed by ensureSession() above. (Re-fetch on demand via
+                // selectSession / new-chat instead of every turn.)
             } catch (e) {
                 removeThinkingRow();
                 console.error('sendMessage failed', e);
@@ -698,6 +718,19 @@
         els.btnOpenSettings.addEventListener('click', openSettings);
         els.settingsClose.addEventListener('click', closeSettings);
         els.settingsCancel.addEventListener('click', closeSettings);
+        // Clicking the dimmed backdrop (not the card) closes the drawer.
+        els.settingsDrawer.addEventListener('click', (e) => {
+            if (e.target === els.settingsDrawer) closeSettings();
+        });
+        // Esc closes drawer first, then the mobile sidebar.
+        document.addEventListener('keydown', (e) => {
+            if (e.key !== 'Escape') return;
+            if (!els.settingsDrawer.hidden) {
+                closeSettings();
+            } else if (els.sidebar.classList.contains('open')) {
+                els.sidebar.classList.remove('open');
+            }
+        });
         els.settingsForm.addEventListener('submit', (e) => {
             e.preventDefault();
             const name = els.settingsNameInput.value.trim();

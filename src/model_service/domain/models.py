@@ -87,6 +87,33 @@ class InferenceResult:
     created_at: datetime | None = None
 
 
+def http_status_from_exception(exc: BaseException) -> int | None:
+    """Best-effort HTTP status extraction from provider SDK errors.
+
+    Duck-typed (no optional-SDK imports): Groq's ``APIStatusError`` and
+    HTTPX errors carry ``status_code``; huggingface-hub's
+    ``HfHubHTTPError`` carries ``response.status_code``. Timeouts and
+    connection errors map to 408/503 equivalents so callers can treat
+    them uniformly. Returns None when nothing is recognizable.
+    """
+    for attr in ("status_code", "status"):
+        value = getattr(exc, attr, None)
+        if isinstance(value, int) and 100 <= value <= 599:
+            return value
+    response = getattr(exc, "response", None)
+    if response is not None:
+        for attr in ("status_code", "status"):
+            value = getattr(response, attr, None)
+            if isinstance(value, int) and 100 <= value <= 599:
+                return value
+    name = exc.__class__.__name__.lower()
+    if "timeout" in name:
+        return 408
+    if "connect" in name or "unreachable" in name:
+        return 503
+    return None
+
+
 @dataclass(frozen=True, slots=True)
 class ModelInfo:
     """Metadata about an available model."""

@@ -20,6 +20,35 @@ from model_service.domain.ports import ModelProvider
 
 logger = logging.getLogger("model_service.fallback")
 
+# HTTP statuses worth retrying on the secondary provider.
+_RECOVERABLE_STATUSES = frozenset({402, 408, 425, 429, 500, 502, 503, 504})
+# Definitive client errors: retrying elsewhere won't help (bad key,
+# unknown model, malformed request). Anything unlisted falls through
+# to the legacy keyword match below.
+_FATAL_STATUSES = frozenset({400, 401, 403, 404, 405, 422})
+
+# Legacy keyword fallback for errors without a machine-readable status.
+_RECOVERABLE_KEYWORDS = (
+    "402", "429", "payment required", "rate limit",
+    "quota", "credit", "insufficient", "timeout",
+    "connection", "unreachable", "service unavailable",
+    "503", "504", "gateway",
+)
+
+
+def _is_recoverable(result: InferenceResult) -> bool:
+    """True iff a failed primary result should trigger the fallback.
+
+    Prefers the structured ``http_status`` providers attach to error
+    metadata; falls back to keyword matching for unclassified errors
+    so behavior never regresses to fail-closed.
+    """
+    status = (result.metadata or {}).get("http_status")
+    if isinstance(status, int):
+        return status in _RECOVERABLE_STATUSES
+    error_msg = (result.output or "").lower()
+    return any(kw in error_msg for kw in _RECOVERABLE_KEYWORDS)
+
 
 class FallbackProvider(ModelProvider):
     """Tries primary provider first; on failure (402, 429, timeout), uses fallback."""
@@ -56,17 +85,7 @@ class FallbackProvider(ModelProvider):
             return replace(fallback_result, metadata=meta)
 
         if result.output and result.output.startswith("ERROR:"):
-            error_msg = result.output.lower()
-            is_recoverable = any(
-                kw in error_msg
-                for kw in [
-                    "402", "429", "payment required", "rate limit",
-                    "quota", "credit", "insufficient", "timeout",
-                    "connection", "unreachable", "service unavailable",
-                    "503", "504", "gateway",
-                ]
-            )
-            if is_recoverable:
+            if _is_recoverable(result):
                 logger.warning(
                     "Primary provider failed (%s), falling back to secondary",
                     result.output[:100],

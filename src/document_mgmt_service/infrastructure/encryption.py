@@ -26,14 +26,20 @@ logger = logging.getLogger("document_mgmt_service.encryption")
 # Fernet requires a 32-byte key base64-encoded
 _FERNET_PREFIX = b"AAAA"
 
-# Fields that are encrypted (sensitive content)
-_ENCRYPTED_FIELDS = frozenset({"text", "description", "metadata"})
+# Fields that are encrypted (sensitive content). `original_filename` is
+# included: reads always decrypt before display (see qdrant.search), so
+# filenames like "aadhaar card.jpeg" no longer sit in plaintext.
+_ENCRYPTED_FIELDS = frozenset({"text", "description", "metadata", "original_filename"})
 
-# Fields that remain in plaintext (needed for filtering/provenance)
+# Fields that remain in plaintext (needed for filtering/provenance).
+# This set must match the keys _build_payload actually emits; anything
+# NOT listed here or in _ENCRYPTED_FIELDS is encrypted by default (with
+# a warning) so a future field can never slip through unencrypted.
 _PLAINTEXT_FIELDS = frozenset({
     "chunk_id", "document_id", "version", "chunk_index",
     "page_number", "start_char", "end_char",
     "privacy", "content_type", "created_at",
+    "field_pointers", "owner_type", "relation",
 })
 
 
@@ -120,7 +126,14 @@ def encrypt_payload(
 
     encrypted = {}
     for field, value in payload.items():
-        if field in _ENCRYPTED_FIELDS:
+        if field in _ENCRYPTED_FIELDS or (
+            field not in _PLAINTEXT_FIELDS and not field.startswith("_enc_")
+        ):
+            if field not in _ENCRYPTED_FIELDS:
+                logger.warning(
+                    "Unknown payload field '%s' — encrypting by default",
+                    field,
+                )
             if value is None:
                 encrypted[field] = None
             else:

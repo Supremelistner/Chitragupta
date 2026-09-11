@@ -613,5 +613,140 @@ class TestGeminiProviderInFactory(unittest.TestCase):
         self.assertIsInstance(providers["huggingface"], GeminiProviderAdapter)
 
 
+class TestFallbackProvider(unittest.TestCase):
+    """Structured-status fallback triggering (no network)."""
+
+    def _req(self):
+        from model_service.domain.models import (
+            InferenceRequest, InferenceTaskType,
+        )
+        return InferenceRequest(task=InferenceTaskType.TEXT_EXTRACTION)
+
+    def _ok(self, who: str = "fallback"):
+        from model_service.domain.models import (
+            InferenceResult, InferenceTaskType, ModelProviderType,
+        )
+        return InferenceResult(
+            task=InferenceTaskType.TEXT_EXTRACTION,
+            provider=ModelProviderType.HUGGINGFACE,
+            model_id=f"{who}-model", output=f"{who} says hi",
+        )
+
+    def _err(self, output: str, metadata: dict | None = None):
+        from model_service.domain.models import (
+            InferenceResult, InferenceTaskType, ModelProviderType,
+        )
+        return InferenceResult(
+            task=InferenceTaskType.TEXT_EXTRACTION,
+            provider=ModelProviderType.HUGGINGFACE,
+            model_id="primary-model", output=output,
+            metadata=metadata or {},
+        )
+
+    def _provider(self, result=None, exc: Exception | None = None):
+        from model_service.infrastructure.fallback_provider import (
+            FallbackProvider,
+        )
+        from model_service.domain.models import ModelProviderType
+
+        ok_result = self._ok()
+
+        class _Fake:
+            def __init__(self, fn):
+                self._fn = fn
+
+            @property
+            def provider_type(self):
+                return ModelProviderType.HUGGINGFACE
+
+            def infer(self, request):
+                return self._fn(request)
+
+        def _primary_fn(request):
+            if exc is not None:
+                raise exc
+            return result
+
+        return FallbackProvider(
+            primary=_Fake(_primary_fn),
+            fallback=_Fake(lambda request: ok_result),
+        )
+
+    def test_recoverable_status_falls_back(self):
+        for status in (402, 429, 503):
+            with self.subTest(status=status):
+                fb = self._provider(self._err(
+                    f"ERROR: HTTP {status}",
+                    {"error": "x", "http_status": status}))
+                out = fb.infer(self._req())
+                self.assertEqual(out.output, "fallback says hi")
+                self.assertTrue(out.metadata.get("used_fallback"))
+
+    def test_fatal_status_does_not_fall_back(self):
+        for status in (400, 401, 403, 404):
+            with self.subTest(status=status):
+                fb = self._provider(self._err(
+                    "ERROR: bad request",
+                    {"error": "x", "http_status": status}))
+                out = fb.infer(self._req())
+                self.assertTrue(out.output.startswith("ERROR:"))
+                self.assertNotIn("used_fallback", out.metadata)
+
+    def test_keyword_fallback_preserved_without_status(self):
+        fb = self._provider(self._err("ERROR: rate limit exceeded"))
+        out = fb.infer(self._req())
+        self.assertEqual(out.output, "fallback says hi")
+
+    def test_raised_exception_still_falls_back(self):
+        fb = self._provider(exc=ConnectionError("down"))
+        out = fb.infer(self._req())
+        self.assertEqual(out.output, "fallback says hi")
+
+    def test_list_models_does_not_mutate_primary(self):
+        from model_service.domain.models import ModelInfo, ModelProviderType
+        from model_service.infrastructure.fallback_provider import (
+            FallbackProvider,
+        )
+
+        class _Fake:
+            def __init__(self, models):
+                self._models = models
+
+            @property
+            def provider_type(self):
+                return ModelProviderType.HUGGINGFACE
+
+            def list_models(self):
+                return self._models
+
+        mine = [ModelInfo(model_id="a", provider=ModelProviderType.HUGGINGFACE,
+                          display_name="a")]
+        theirs = [ModelInfo(model_id="b", provider=ModelProviderType.HUGGINGFACE,
+                            display_name="b")]
+        FallbackProvider(primary=_Fake(mine), fallback=_Fake(theirs)).list_models()
+        self.assertEqual([m.model_id for m in mine], ["a"])
+        self.assertEqual([m.model_id for m in theirs], ["b"])
+
+    def test_http_status_extraction(self):
+        from model_service.domain.models import http_status_from_exception
+
+        class _WithCode(Exception):
+            def __init__(self):
+                self.status_code = 429
+
+        class _WithResponse:
+            def __init__(self):
+                self.response = type("R", (), {"status_code": 503})()
+
+        class _Timeout(Exception):
+            pass
+        _Timeout.__name__ = "ReadTimeout"
+
+        self.assertEqual(http_status_from_exception(_WithCode()), 429)
+        self.assertEqual(http_status_from_exception(_WithResponse()), 503)
+        self.assertEqual(http_status_from_exception(_Timeout()), 408)
+        self.assertIsNone(http_status_from_exception(ValueError("plain")))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -38,9 +38,10 @@ class SemanticChunkStore(Protocol):
         document_id: str | None = None,
         version: int | None = None,
         privacy: DocumentPrivacyClassification | None = None,
+        user_id: str | None = None,
     ) -> list[SemanticChunkMatch]: ...
 
-    def delete_document(self, document_id: str, version: int | None = None) -> None: ...
+    def delete_document(self, document_id: str, version: int | None = None, user_id: str | None = None) -> None: ...
 
 
 class TextEmbeddingService:
@@ -123,6 +124,7 @@ class SemanticChunker:
                         original_filename=record.original_filename,
                         content_type=record.content_type,
                         created_at=record.completed_at or record.updated_at or record.created_at,
+                        user_id=getattr(record, "user_id", "__local__") or "__local__",
                     )
                 )
                 chunk_index += 1
@@ -159,6 +161,7 @@ class SemanticChunker:
                     original_filename=record.original_filename,
                     content_type=record.content_type,
                     created_at=record.completed_at or record.updated_at or record.created_at,
+                    user_id=getattr(record, "user_id", "__local__") or "__local__",
                 )
             )
         return chunks
@@ -239,11 +242,13 @@ class SemanticSearchService:
         *,
         limit: int = 10,
         privacy: DocumentPrivacyClassification | None = None,
+        user_id: str | None = None,
     ) -> list[SemanticDocumentSearchResult]:
         matches = self._store.search(
             query_vector=self._embedder.embed(query),
             limit=max(limit * 4, limit),
             privacy=privacy,
+            user_id=user_id,
         )
         grouped: dict[tuple[str, int], dict[str, Any]] = {}
         for match in matches:
@@ -288,6 +293,7 @@ class SemanticSearchService:
         document_id: str | None = None,
         version: int | None = None,
         privacy: DocumentPrivacyClassification | None = None,
+        user_id: str | None = None,
     ) -> list[SemanticContentSearchResult]:
         matches = self._store.search(
             query_vector=self._embedder.embed(query),
@@ -295,6 +301,7 @@ class SemanticSearchService:
             document_id=document_id,
             version=version,
             privacy=privacy,
+            user_id=user_id,
         )
         return [
             SemanticContentSearchResult(
@@ -317,12 +324,14 @@ class SemanticSearchService:
         version: int,
         query: str,
         limit: int = 5,
+        user_id: str | None = None,
     ) -> list[SemanticEvidenceResult]:
         matches = self._store.search(
             query_vector=self._embedder.embed(query),
             limit=limit,
             document_id=document_id,
             version=version,
+            user_id=user_id,
         )
         return [
             SemanticEvidenceResult(

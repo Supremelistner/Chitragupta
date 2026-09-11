@@ -1,13 +1,11 @@
 {
   "app_name": "Chitragupta",
   "app_tagline": "Your personal document assistant",
-
   "nav_sessions": "Chats",
   "nav_new_chat": "New chat",
   "nav_settings": "Settings",
   "nav_dark_mode": "Dark mode",
   "nav_close": "Close",
-
   "welcome_greeting": "Hello, {name}",
   "welcome_subtitle": "I help you manage your documents. Pick a common task below, or type your question.",
   "welcome_card_id_title": "Photo an ID card",
@@ -18,34 +16,28 @@
   "welcome_card_bank_sub": "Open an account, KYC",
   "welcome_card_scheme_title": "Government scheme",
   "welcome_card_scheme_sub": "Pension, ration, Ayushman",
-
   "quick_id": "Show my IDs",
   "quick_search": "Search",
   "quick_validate": "Validate",
   "quick_photo": "Take photo",
-
   "input_placeholder": "Type your question here…",
   "input_send": "Send",
   "input_attach": "Attach photo",
   "input_mic": "Speak",
   "input_voice_disabled": "Coming soon",
-
   "listening": "Listening…",
   "speaking": "Speaking…",
   "stop_speaking": "Stop",
-
   "bot_thinking": "Thinking…",
   "bot_listen": "🔊 Listen",
   "bot_stop": "⏹ Stop",
   "bot_save": "💾 Save",
   "bot_share": "📤 Share",
-
   "confirmation_title": "Should I show your",
   "confirmation_field_label": "?",
   "confirmation_yes": "Yes, show it",
   "confirmation_no": "No, cancel",
   "confirmation_correction_placeholder": "Wrong field? Type the right name",
-
   "settings_profile": "Profile",
   "settings_autoread_label": "Read replies aloud",
   "field_label_aadhaar_number": "Aadhaar number",
@@ -73,30 +65,32 @@
   "settings_save": "Save",
   "settings_close": "Close",
   "settings_done": "Done",
-
   "profile_setup_greeting": "Hello",
   "profile_setup_prompt": "What should I call you?",
   "profile_setup_helper": "I'll address you as {name}.",
   "profile_setup_continue": "Get started",
-
   "error_camera": "Camera is blocked. Please allow access.",
   "error_mic": "Microphone is blocked. Please allow access so I can listen.",
   "error_upload": "Upload failed. Please try again.",
   "error_tts": "Couldn't play audio. Please read the text instead.",
   "error_network": "Network error. Please try again.",
-
   "empty_state": "No conversations yet.",
   "session_count": "{count} chats",
   "session_just_now": "just now",
   "session_minutes_ago": "{n} min ago",
   "session_hours_ago": "{n} h ago",
   "session_days_ago": "{n} d ago",
-
   "delete_session": "Delete chat",
   "delete_confirm": "Are you sure you want to delete this chat?",
-
   "language_label_hi": "हिन्दी",
   "language_label_en": "English",
   "language_label_ta": "தமிழ்",
-  "language_label_bn": "বাংলা"
+  "language_label_bn": "বাংলা",
+  "auth_title": "Log in",
+  "auth_email": "Email",
+  "auth_password": "Password",
+  "auth_login": "Log in",
+  "auth_register": "Create account",
+  "auth_need_account": "Create a new account",
+  "auth_have_account": "I already have an account"
 }

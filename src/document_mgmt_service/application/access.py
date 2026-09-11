@@ -256,12 +256,12 @@ class DocumentAccessService:
     def get_metadata(self, document_id: str, version: int) -> AccessResponse:
         return self.get_document_metadata(document_id, version)
 
-    def list_documents(self) -> dict[str, Any]:
-        documents = self._repository.list_documents()
+    def list_documents(self, user_id: str | None = None) -> dict[str, Any]:
+        documents = self._repository.list_documents(user_id=user_id) if user_id else self._repository.list_documents()
         results = [self._summary_payload(summary) for summary in documents]
         return {"results": results}
 
-    def list_expiring_documents(self, within_days: int = 60) -> dict[str, Any]:
+    def list_expiring_documents(self, within_days: int = 60, user_id: str | None = None) -> dict[str, Any]:
         """Latest versions expiring within N days — overdue ones included.
 
         Drives the elderly-friendly expiry banner. Summaries only (safe
@@ -269,7 +269,8 @@ class DocumentAccessService:
         """
         now = datetime.now(timezone.utc)
         results = []
-        for summary in self._repository.list_documents():
+        docs = self._repository.list_documents(user_id=user_id) if user_id else self._repository.list_documents()
+        for summary in docs:
             expiry = summary.expiry_date
             if expiry is None:
                 continue
@@ -283,8 +284,8 @@ class DocumentAccessService:
         results.sort(key=lambda r: (r["days_until_expiry"], r["document_id"]))
         return {"results": results}
 
-    def search_documents(self, query: str, *, limit: int = 10, requestor: str | None = None) -> dict[str, Any]:
-        hits = self._search.search_documents(query, limit=limit)
+    def search_documents(self, query: str, *, limit: int = 10, requestor: str | None = None, user_id: str | None = None) -> dict[str, Any]:
+        hits = self._search.search_documents(query, limit=limit, user_id=user_id)
         results: list[dict[str, Any]] = []
         top_decision = AccessDecision(AccessAction.ALLOW, "document-level summaries are low-risk")
         for hit in hits:
@@ -323,8 +324,8 @@ class DocumentAccessService:
             "results": results,
         }
 
-    def search_document_content(self, query: str, *, limit: int = 10, document_id: str | None = None, version: int | None = None, requestor: str | None = None) -> dict[str, Any]:
-        hits = self._search.search_content(query, limit=limit, document_id=document_id, version=version)
+    def search_document_content(self, query: str, *, limit: int = 10, document_id: str | None = None, version: int | None = None, requestor: str | None = None, user_id: str | None = None) -> dict[str, Any]:
+        hits = self._search.search_content(query, limit=limit, document_id=document_id, version=version, user_id=user_id)
         results: list[dict[str, Any]] = []
         for hit in hits:
             record = self._load_record(hit.document_id, hit.version)
@@ -354,16 +355,17 @@ class DocumentAccessService:
             "results": results,
         }
 
-    def search_content(self, query: str, *, limit: int = 10, document_id: str | None = None, version: int | None = None, requestor: str | None = None) -> dict[str, Any]:
+    def search_content(self, query: str, *, limit: int = 10, document_id: str | None = None, version: int | None = None, requestor: str | None = None, user_id: str | None = None) -> dict[str, Any]:
         return self.search_document_content(
             query,
             limit=limit,
             document_id=document_id,
             version=version,
             requestor=requestor,
+            user_id=user_id,
         )
 
-    def get_evidence(self, *, document_id: str, version: int, query: str, limit: int = 5, requestor: str | None = None) -> dict[str, Any]:
+    def get_evidence(self, *, document_id: str, version: int, query: str, limit: int = 5, requestor: str | None = None, user_id: str | None = None) -> dict[str, Any]:
         record = self._load_record(document_id, version)
         request = AccessRequest(
             document_id=document_id,
@@ -382,7 +384,7 @@ class DocumentAccessService:
                 "access_reason": decision.reason,
                 "results": [],
             }
-        hits = self._search.retrieve_evidence(document_id=document_id, version=version, query=query, limit=limit)
+        hits = self._search.retrieve_evidence(document_id=document_id, version=version, query=query, limit=limit, user_id=user_id)
         results = [self._evidence_payload(hit, redacted=decision.action == AccessAction.REDACT) for hit in hits]
         return {
             "query": query,
@@ -391,13 +393,14 @@ class DocumentAccessService:
             "results": results,
         }
 
-    def retrieve_evidence(self, *, document_id: str, version: int, query: str, limit: int = 5, requestor: str | None = None) -> dict[str, Any]:
+    def retrieve_evidence(self, *, document_id: str, version: int, query: str, limit: int = 5, requestor: str | None = None, user_id: str | None = None) -> dict[str, Any]:
         return self.get_evidence(
             document_id=document_id,
             version=version,
             query=query,
             limit=limit,
             requestor=requestor,
+            user_id=user_id,
         )
 
     def get_page(self, document_id: str, version: int, page_number: int, *, requestor: str | None = None) -> AccessResponse:

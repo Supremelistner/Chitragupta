@@ -39,8 +39,26 @@ _PLAINTEXT_FIELDS = frozenset({
     "chunk_id", "document_id", "version", "chunk_index",
     "page_number", "start_char", "end_char",
     "privacy", "content_type", "created_at",
-    "field_pointers", "owner_type", "relation",
+    "field_pointers", "owner_type", "relation", "user_id",
 })
+
+
+def derive_user_master_key(master_key: str, user_id: str | None) -> str:
+    """V2 per-user master: HMAC(master, "user|id") hex.
+
+    Legacy rows (no user / "__local__") return the global master unchanged
+    so existing data keeps decrypting. Every other user gets an isolated
+    key domain: the global hub operator holding one user's key learns
+    nothing about another user's chunks.
+    """
+    uid = (user_id or "").strip()
+    if not master_key or not uid or uid == "__local__":
+        return master_key
+    return hmac.new(
+        key=master_key.encode("utf-8"),
+        msg=f"chitragupta-user-v1|{uid}".encode("utf-8"),
+        digestmod=hashlib.sha256,
+    ).hexdigest()
 
 
 def derive_document_key(
@@ -103,6 +121,7 @@ def encrypt_payload(
     version: int,
     upload_date: str,
     master_key: str,
+    user_id: str | None = None,
 ) -> dict[str, Any]:
     """Encrypt sensitive fields in a Qdrant payload (scheme v2).
 
@@ -120,7 +139,8 @@ def encrypt_payload(
 
     key = derive_document_key(
         document_id=document_id, version=version,
-        upload_date=upload_date, master_key=master_key,
+        upload_date=upload_date,
+        master_key=derive_user_master_key(master_key, user_id or payload.get("user_id")),
     )
     fernet = Fernet(key)
 
@@ -227,18 +247,19 @@ def decrypt_payload_with_date(
     from cryptography.fernet import Fernet
 
     upload_date = payload.get("_enc_date", "") or payload.get("created_at", "") or ""
+    effective_master = derive_user_master_key(master_key, payload.get("user_id"))
     if payload.get("_enc_v") == 2:
         key = derive_document_key(
             document_id=str(payload.get("document_id", "")),
             version=int(payload.get("version", 0) or 0),
             upload_date=upload_date,
-            master_key=master_key,
+            master_key=effective_master,
         )
         result = _decrypt_with_key(payload, Fernet(key))
     elif payload.get("_enc_desc"):
         # Legacy v1 point: description hint still present.
         description = payload.get("_enc_desc", "") or ""
-        key = derive_encryption_key(description, upload_date, master_key)
+        key = derive_encryption_key(description, upload_date, effective_master)
         result = _decrypt_with_key(payload, Fernet(key))
     else:
         return payload

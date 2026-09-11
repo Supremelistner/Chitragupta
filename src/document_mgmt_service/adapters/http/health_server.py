@@ -238,6 +238,10 @@ class _DocumentRequestHandler(BaseHTTPRequestHandler):
                 self._handle_upload()
                 return
 
+            if path == "/documents/restore":
+                self._handle_restore()
+                return
+
             if path == "/search/documents":
                 self._handle_document_search()
                 return
@@ -269,9 +273,92 @@ class _DocumentRequestHandler(BaseHTTPRequestHandler):
             logging.getLogger("document_mgmt_service.http").exception("Request failed")
             self._send_json(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(exc)})
 
+    def _handle_restore(self) -> None:
+        """V2-4 version-preserving restore for device pull.
+
+        Body: {document_id, version, user_id, filename, content_type,
+        content_base64, metadata?}. Re-inserts the exact version (higher
+        version wins; stale restores are acknowledged without overwrite)
+        so a wiped device pulls back identical IDs/versions.
+        """
+        from document_mgmt_service.application.ingestion import _lock_for_document
+        from document_mgmt_service.domain.models import (
+            DocumentPrivacyClassification, DocumentProcessingStatus,
+        )
+        payload = self._read_json_body()
+        document_id = str(payload.get("document_id") or "")
+        version = int(payload.get("version") or 0)
+        user_id = str(payload.get("user_id") or self.headers.get("X-User-Id") or "__local__")
+        if not document_id or version <= 0:
+            raise IngestionError("document_id and positive version are required")
+        try:
+            content = base64.b64decode(payload.get("content_base64") or "")
+        except Exception as exc:
+            raise IngestionError(f"invalid content_base64: {exc}")
+        if not content:
+            raise IngestionError("empty restore content")
+        svc = self.ingestion_service
+        deps = svc._dependencies
+        lock = _lock_for_document(document_id)
+        lock.acquire()
+        try:
+            existing = deps.repository.get_version(document_id, version)
+            if existing is not None and getattr(existing, "user_id", "__local__") == user_id:
+                self._send_json(HTTPStatus.OK, {"restored": False, "reason": "already present",
+                                                "document_id": document_id, "version": version})
+                return
+            latest = deps.repository.list_versions(document_id)
+            if any(v.version > version for v in latest):
+                self._send_json(HTTPStatus.OK, {"restored": False, "reason": "newer version present",
+                                                "document_id": document_id, "version": version})
+                return
+            import tempfile
+            from hashlib import sha256 as _sha
+            from pathlib import Path as _Path
+            from document_mgmt_service.application.metadata import infer_file_kind
+            filename = str(payload.get("filename") or f"{document_id}_v{version}")
+            file_kind = infer_file_kind(filename, payload.get("content_type"))
+            storage_key = svc._storage_key(document_id, version, filename)
+            with tempfile.NamedTemporaryFile(delete=False) as tf:
+                tf.write(content)
+                tmp = _Path(tf.name)
+            try:
+                deps.storage.put(tmp, storage_key)
+            finally:
+                tmp.unlink(missing_ok=True)
+            now = svc._clock()
+            from document_mgmt_service.domain.models import (
+                DocumentVersionRecord, SemanticIndexStatus,
+            )
+            record = DocumentVersionRecord(
+                document_id=document_id, version=version, user_id=user_id,
+                original_filename=filename, content_type=payload.get("content_type"),
+                file_kind=file_kind, storage_key=storage_key,
+                file_size_bytes=len(content), sha256=_sha(content).hexdigest(),
+                privacy=DocumentPrivacyClassification.OPEN_NOT_PUBLIC,
+                processing_status=DocumentProcessingStatus.COMPLETED,
+                metadata=dict(payload.get("metadata") or {}),
+                semantic_index_status=SemanticIndexStatus.PENDING,
+                created_at=now, updated_at=now, completed_at=now,
+            )
+            deps.repository.upsert_version(record)
+            try:
+                if deps.semantic_search is not None:
+                    deps.semantic_search.index_document(record)
+            except Exception:
+                logging.getLogger("document_mgmt_service.http").exception("Restore reindex failed")
+            self._send_json(HTTPStatus.CREATED, {"restored": True, "document_id": document_id,
+                                                 "version": version, "user_id": user_id})
+        finally:
+            lock.release()
+
     def _handle_upload(self) -> None:
         try:
             request = self._parse_ingestion_request()
+            _uid = (self.headers.get("X-User-Id") or "").strip() or "__local__"
+            if getattr(request, "user_id", "__local__") in (None, "", "__local__") and _uid != "__local__":
+                import dataclasses
+                request = dataclasses.replace(request, user_id=_uid)
 
             # Check for multi-page PDF
             from document_mgmt_service.infrastructure.pdf_splitter import (
@@ -292,6 +379,7 @@ class _DocumentRequestHandler(BaseHTTPRequestHandler):
                             content=page.image_bytes,
                             content_type=page.content_type,
                             document_id=None,  # New document_id per page
+                            user_id=getattr(request, "user_id", "__local__") or "__local__",
                             privacy_hint=request.privacy_hint,
                             description_hint=f"Page {page.page_number} of {split_result.total_pages}",
                             metadata={
@@ -541,7 +629,8 @@ class _DocumentRequestHandler(BaseHTTPRequestHandler):
     # --- /tools/{name} handler methods ---------------------------------
 
     def _tool_list_documents(self, args: dict) -> None:
-        results = self.access_service.list_documents()
+        user_id = args.get("user_id") or self.headers.get("X-User-Id") or None
+        results = self.access_service.list_documents(user_id=user_id)
         self._send_json(HTTPStatus.OK, results)
 
     def _tool_list_expiring_documents(self, args: dict) -> None:
@@ -942,6 +1031,7 @@ class _DocumentRequestHandler(BaseHTTPRequestHandler):
             "description": self._form_value(form, "description"),
             "metadata": self._form_value(form, "metadata"),
             "content_type": file_field.type,
+            "user_id": self._form_value(form, "user_id") or (self.headers.get("X-User-Id") or "").strip() or None,
         }
         return self._request_from_payload(payload, content=content)
 
@@ -975,6 +1065,7 @@ class _DocumentRequestHandler(BaseHTTPRequestHandler):
             privacy_hint=privacy,
             description_hint=payload.get("description"),
             metadata=metadata,
+            user_id=str(payload.get("user_id") or metadata.get("user_id") or "__local__"),
         )
 
     def _read_json_body(self) -> dict[str, Any]:

@@ -21,6 +21,129 @@
     const PROFILE_KEY = 'chitragupta.profile';
     const THEME_KEY = 'chitragupta.theme';
     const AUTOREAD_KEY = 'chitragupta.autoread';
+    const TOKEN_KEY = 'chitragupta.token';
+    const AUTH_USER_KEY = 'chitragupta.auth_user';
+
+    // ─── Auth (V1 multi-user: JWT, 7d sliding) ──────────────
+    // Single fetch wrapper: injects Bearer for same-origin /api/* calls,
+    // retries once after a silent refresh on 401. Call sites unchanged.
+    const Auth = {
+        mode: 'login',
+        getToken() { try { return localStorage.getItem(TOKEN_KEY); } catch { return null; } },
+        setSession(token, user) {
+            try {
+                if (token) localStorage.setItem(TOKEN_KEY, token); else localStorage.removeItem(TOKEN_KEY);
+                if (user) localStorage.setItem(AUTH_USER_KEY, JSON.stringify(user)); else localStorage.removeItem(AUTH_USER_KEY);
+            } catch { /* private mode */ }
+            const label = document.getElementById('auth-email-label');
+            if (label) label.textContent = user && user.email ? user.email : '';
+        },
+        getUser() { try { const raw = localStorage.getItem(AUTH_USER_KEY); return raw ? JSON.parse(raw) : null; } catch { return null; } },
+        async refresh() {
+            const token = this.getToken();
+            if (!token) return null;
+            try {
+                const r = await window.__rawFetch(API + '/api/auth/refresh', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+                    body: JSON.stringify({ token }),
+                });
+                if (!r.ok) return null;
+                const data = await r.json();
+                this.setSession(data.token, { user_id: data.user_id, email: (this.getUser() || {}).email });
+                return data.token;
+            } catch { return null; }
+        },
+    };
+
+    if (!window.__rawFetch) {
+        window.__rawFetch = window.fetch.bind(window);
+        window.fetch = async function (url, opts) {
+            opts = opts || {};
+            const token = Auth.getToken();
+            if (typeof url === 'string' && url.includes('/api/') && token) {
+                opts.headers = Object.assign({}, opts.headers, { 'Authorization': 'Bearer ' + token });
+            }
+            let r = await window.__rawFetch(url, opts);
+            if (r.status === 401 && typeof url === 'string' && url.includes('/api/') && !url.includes('/api/auth/')) {
+                const fresh = await Auth.refresh();
+                if (fresh) {
+                    opts.headers = Object.assign({}, opts.headers, { 'Authorization': 'Bearer ' + fresh });
+                    r = await window.__rawFetch(url, opts);
+                } else {
+                    Auth.setSession(null, null);
+                    const modal = document.getElementById('auth-modal');
+                    if (modal) modal.hidden = false;
+                }
+            }
+            return r;
+        };
+    }
+
+    function setupAuth() {
+        const modal = $('auth-modal') || document.getElementById('auth-modal');
+        const form = $('auth-form') || document.getElementById('auth-form');
+        const emailInput = document.getElementById('auth-email-input');
+        const passInput = document.getElementById('auth-password-input');
+        const errBox = document.getElementById('auth-modal-error');
+        const modeToggle = document.getElementById('auth-mode-toggle');
+        const submitBtn = document.getElementById('auth-submit-btn');
+        const logoutBtn = document.getElementById('btn-logout');
+        if (!modal || !form) return;
+        const showError = (msg) => { if (errBox) { errBox.textContent = msg; errBox.hidden = false; } };
+        if (!Auth.getToken()) modal.hidden = false;
+        else { modal.hidden = true; const u = Auth.getUser(); if (u && u.email) { const l = document.getElementById('auth-email-label'); if (l) l.textContent = u.email; } }
+        if (modeToggle) modeToggle.addEventListener('click', () => {
+            Auth.mode = Auth.mode === 'login' ? 'register' : 'login';
+            if (submitBtn) submitBtn.textContent = Auth.mode === 'login' ? t('auth_login') : t('auth_register');
+            modeToggle.textContent = Auth.mode === 'login' ? t('auth_need_account') : t('auth_have_account');
+        });
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            if (errBox) errBox.hidden = true;
+            const email = (emailInput.value || '').trim();
+            const password = passInput.value || '';
+            try {
+                const r = await window.__rawFetch(API + '/api/auth/' + Auth.mode, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ email, password }),
+                });
+                const data = await r.json().catch(() => ({}));
+                if (!r.ok) throw new Error(data.detail || ('HTTP ' + r.status));
+                Auth.setSession(data.token, { user_id: data.user_id, email: data.email });
+                modal.hidden = true;
+                // Fresh login on shared device: pull global manifest note.
+                try {
+                    const m = await window.__rawFetch(API + '/api/sync/manifest', {
+                        headers: { 'Authorization': 'Bearer ' + data.token },
+                    });
+                    if (m.ok) { const man = await m.json(); console.info('sync manifest docs:', Object.keys(man.documents || {}).length); }
+                } catch (err) { console.warn('sync manifest check failed', err); }
+                setupProfile();
+                await ensureSession();
+                await refreshSessionList();
+            } catch (err) {
+                showError(String((err && err.message) || err));
+            }
+        });
+        if (logoutBtn) logoutBtn.addEventListener('click', async () => {
+            const token = Auth.getToken();
+            const user = Auth.getUser();
+            try {
+                await window.__rawFetch(API + '/api/auth/logout', {
+                    method: 'POST',
+                    headers: Object.assign({ 'Content-Type': 'application/json' }, token ? { 'Authorization': 'Bearer ' + token } : {}),
+                    body: JSON.stringify({ wipe: true, user_id: user && user.user_id }),
+                });
+            } catch { /* best-effort wipe */ }
+            Auth.setSession(null, null);
+            try { localStorage.removeItem(PROFILE_KEY); } catch { /* private mode */ }
+            state.currentSessionId = null;
+            state.profile = null;
+            modal.hidden = false;
+        });
+    }
 
     // ─── State ─────────────────────────────────────────────────
     const state = {
@@ -224,9 +347,12 @@
         }
     }
 
+    let _profileWired = false;
     function setupProfile() {
         state.profile = loadProfile();
-        if (!state.profile) {
+        // Auth comes first: never stack the name modal under the login modal.
+        const authed = Auth.getToken();
+        if (!state.profile && authed) {
             showProfileModal();
             // One-tap language choice during onboarding: applies live so
             // the rest of the modal immediately speaks their language.
@@ -243,9 +369,12 @@
                 });
             });
             markOnboardingLang();
-        } else {
+        } else if (state.profile) {
             applyProfile();
         }
+        // Idempotent: login calls setupProfile() again — never double-bind.
+        if (_profileWired) return;
+        _profileWired = true;
         els.profileForm.addEventListener('submit', (e) => {
             e.preventDefault();
             const name = els.profileNameInput.value.trim();
@@ -988,6 +1117,7 @@
         await setLanguage(initial);
         setupTheme();
         setupAutoread();
+        setupAuth();
         setupProfile();
         setupLanguageSwitch();
         setupLifeCards();

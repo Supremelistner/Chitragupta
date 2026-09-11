@@ -33,6 +33,29 @@
         </div>
     </div>
 
+    <!-- Auth modal: email+password login/register (V1 multi-user) -->
+    <div class="modal" id="auth-modal" role="dialog" aria-modal="true" aria-labelledby="auth-modal-title" hidden>
+        <div class="modal-card">
+            <div class="modal-greeting" id="auth-modal-greeting">चित्रगुप्त</div>
+            <h1 class="modal-title" id="auth-modal-title" data-i18n="auth_title">लॉगिन करें</h1>
+            <p class="modal-helper" id="auth-modal-error" hidden></p>
+            <form class="profile-form" id="auth-form">
+                <label for="auth-email-input" class="visually-hidden" data-i18n="auth_email">Email</label>
+                <input type="email" id="auth-email-input" class="profile-name-input"
+                       autocomplete="email" required placeholder="you@example.com">
+                <label for="auth-password-input" class="visually-hidden" data-i18n="auth_password">Password</label>
+                <input type="password" id="auth-password-input" class="profile-name-input"
+                       autocomplete="current-password" required minlength="8" placeholder="••••••••">
+                <button type="submit" class="btn btn-primary btn-large" data-i18n="auth_login" id="auth-submit-btn">
+                    लॉगिन
+                </button>
+                <button type="button" class="btn btn-secondary" id="auth-mode-toggle" data-i18n="auth_need_account">
+                    नया खाता बनाएँ
+                </button>
+            </form>
+        </div>
+    </div>
+
     <!-- Settings drawer (closed by default) -->
     <div class="drawer" id="settings-drawer" role="dialog" aria-modal="true" aria-labelledby="settings-drawer-title" hidden>
         <div class="drawer-card">
@@ -84,6 +107,10 @@
                 <!-- populated by JS -->
             </div>
             <div class="sidebar-footer">
+                <span class="brand-tagline" id="auth-email-label" title="Signed in account"></span>
+                <button class="btn-icon sidebar-btn" id="btn-logout" aria-label="Log out">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4M16 17l5-5-5-5M21 12H9"/></svg>
+                </button>
                 <button class="btn-icon sidebar-btn" id="btn-open-settings" aria-label="Settings">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
                 </button>

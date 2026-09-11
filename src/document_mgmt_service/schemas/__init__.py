@@ -230,10 +230,44 @@ CREATE INDEX IF NOT EXISTS idx_doc_versions_model_extraction
 )
 
 # ---------------------------------------------------------------------------
+# Migration 006 — Multi-user tenancy: users + user_id columns
+# ---------------------------------------------------------------------------
+MIGRATION_006 = Migration(
+    version=6,
+    description="Multi-user tenancy: users table and user_id columns (V1 local-primary)",
+    sql="""
+-- users: shared identity for the production global-Postgres phase.
+-- V1 orchestrator auth lives in a file store (see auth_store.py); this
+-- table is the forward-compatible home V2 will move it onto.
+CREATE TABLE IF NOT EXISTS users (
+    user_id       TEXT        PRIMARY KEY,
+    email         TEXT        NOT NULL UNIQUE,
+    pwd_hash      TEXT        NOT NULL,
+    user_key_enc  TEXT,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Tenancy columns: additive, nullable for back-compat. Existing rows
+-- (single-user local data) read back as '__local__' until backfilled.
+ALTER TABLE documents
+    ADD COLUMN IF NOT EXISTS user_id TEXT NOT NULL DEFAULT '__local__';
+ALTER TABLE document_versions
+    ADD COLUMN IF NOT EXISTS user_id TEXT NOT NULL DEFAULT '__local__';
+
+CREATE INDEX IF NOT EXISTS idx_documents_user
+    ON documents (user_id);
+CREATE INDEX IF NOT EXISTS idx_document_versions_user
+    ON document_versions (user_id);
+CREATE INDEX IF NOT EXISTS idx_document_versions_user_doc
+    ON document_versions (user_id, document_id);
+""",
+)
+
+# ---------------------------------------------------------------------------
 # Migration registry
 # ---------------------------------------------------------------------------
 MIGRATIONS: list[Migration] = sorted(
-    [MIGRATION_001, MIGRATION_002, MIGRATION_003, MIGRATION_004, MIGRATION_005],
+    [MIGRATION_001, MIGRATION_002, MIGRATION_003, MIGRATION_004, MIGRATION_005, MIGRATION_006],
     key=lambda m: m.version,
 )
 

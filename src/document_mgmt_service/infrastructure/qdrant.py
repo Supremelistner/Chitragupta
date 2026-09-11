@@ -160,9 +160,15 @@ class QdrantSemanticChunkStoreAdapter(SemanticChunkStore):
         document_id: str | None = None,
         version: int | None = None,
         privacy: DocumentPrivacyClassification | None = None,
+        user_id: str | None = None,
     ) -> list[SemanticChunkMatch]:
         # Build filter conditions
         must_filters = []
+        if user_id is not None:
+            must_filters.append({
+                "key": "user_id",
+                "match": {"value": user_id},
+            })
         if document_id is not None:
             must_filters.append({
                 "key": "document_id",
@@ -221,16 +227,19 @@ class QdrantSemanticChunkStoreAdapter(SemanticChunkStore):
                 original_filename=payload.get("original_filename"),
                 content_type=payload.get("content_type"),
                 created_at=_parse_iso(payload.get("created_at")),
+                user_id=payload.get("user_id", "__local__") or "__local__",
             )
             score = float(hit.get("score", 0.0))
             results.append(SemanticChunkMatch(chunk=chunk, score=score))
 
         return results
 
-    def delete_document(self, document_id: str, version: int | None = None) -> None:
+    def delete_document(self, document_id: str, version: int | None = None, user_id: str | None = None) -> None:
         must_filters = [{"key": "document_id", "match": {"value": document_id}}]
         if version is not None:
             must_filters.append({"key": "version", "match": {"value": version}})
+        if user_id is not None:
+            must_filters.append({"key": "user_id", "match": {"value": user_id}})
 
         url = f"{self._base_url}/collections/{self._collection_name}/points/delete?wait=true"
         body = json.dumps({"filter": {"must": must_filters}}).encode()
@@ -279,6 +288,10 @@ class QdrantSemanticChunkStoreAdapter(SemanticChunkStore):
         # NOTE: relation_name (a person's name) is deliberately NOT surfaced:
         # it stays inside the encrypted "metadata" blob. The "relation"
         # category above is enough for "my mother's docs" filtering.
+        # V1 multi-user: tenant filter. Plaintext by design (like
+        # owner_type) so Qdrant can filter without decrypting.
+        user_id = getattr(chunk, "user_id", "__local__") or "__local__"
+        payload["user_id"] = user_id
         return payload
 
     def _encrypt_if_configured(

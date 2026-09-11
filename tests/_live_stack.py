@@ -128,6 +128,7 @@ def build_qdrant_store(
     *,
     base_url: str = DEFAULT_QDRANT_URL,
     dimension: int = 256,
+    encryption_key: str = "",
 ) -> QdrantSemanticChunkStoreAdapter:
     """Create a per-test Qdrant collection + configured adapter."""
     if not _can_connect_qdrant(base_url):
@@ -142,7 +143,7 @@ def build_qdrant_store(
     adapter = QdrantSemanticChunkStoreAdapter(
         base_url=base_url,
         collection_name=collection_name,
-        encryption_key="",
+        encryption_key=encryption_key,
         dimension=dimension,
         strict=True,
     )

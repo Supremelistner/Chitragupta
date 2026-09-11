@@ -128,6 +128,23 @@
         localStorage.setItem(PROFILE_KEY, JSON.stringify(p));
     }
 
+    // Tell the server our display name so the persona addresses us by
+    // name (it otherwise falls back to "friend"). Fire-and-forget: chat
+    // must never block on this.
+    async function pushProfileToServer(name) {
+        const displayName = (name || '').trim();
+        if (!displayName) return;
+        try {
+            await fetch(API + '/api/profile', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ display_name: displayName.slice(0, 100) }),
+            });
+        } catch (e) {
+            console.warn('pushProfileToServer failed', e);
+        }
+    }
+
     function showProfileModal() {
         els.profileModal.hidden = false;
         els.profileNameInput.value = '';
@@ -165,6 +182,7 @@
             saveProfile(state.profile);
             hideProfileModal();
             applyProfile();
+            pushProfileToServer(name);
             ensureSession();
         });
     }
@@ -740,6 +758,7 @@
                 state.profile = { display_name: name };
                 saveProfile(state.profile);
                 applyProfile();
+                pushProfileToServer(name);
             }
             closeSettings();
         });
@@ -782,6 +801,7 @@
         applyI18nToStatic();
         if (state.profile) {
             applyProfile();
+            pushProfileToServer(state.profile.display_name);
             await ensureSession();
             await applyLanguagePreferenceToCurrentSession();
         }

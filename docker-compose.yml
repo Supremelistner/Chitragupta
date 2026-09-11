@@ -6,6 +6,9 @@
 services:
   postgres:
     image: postgres:16-alpine
+    # Self-heal after Docker Desktop restarts / OOM kills (exit 255 wiped
+    # the stack mid-run before and every test went mass-skip).
+    restart: unless-stopped
     ports:
       - "5432:5432"
     environment:
@@ -22,6 +25,7 @@ services:
 
   qdrant:
     image: qdrant/qdrant:latest
+    restart: unless-stopped
     ports:
       - "6333:6333"
       - "6334:6334"

@@ -209,10 +209,46 @@ class OrchestrationEngine:
         if file is not None:
             english_message = self._attach_file_context(english_message, file)
 
-        response = self._process_message_english(session_id, english_message)
+        response = self._process_message_english(
+            session_id, english_message, original_message=user_message,
+            file_context=bool(file),
+        )
         # Translate outbound: present the response in the user's
         # preferred UI language.
         return self._translate_response(response)
+
+    # Titles the UI sends at creation ("New chat", ...) plus legacy
+    # artifacts. Only these are ever auto-replaced by _maybe_retitle.
+    _DEFAULT_SESSION_TITLES = frozenset({
+        "", "New chat", "New conversation", "नई बातचीत",
+        "புதிய அரட்டை", "नई चैट", "[nav_new_chat]",
+    })
+
+    def _maybe_retitle_session(
+        self, session: Session, original_message: str, file_context: bool = False
+    ) -> None:
+        """Title a fresh session from its first user message.
+
+        Only fires when this is the session's first user message AND the
+        current title is a known default. Uses the ORIGINAL (untranslated)
+        text so Hindi users get Hindi titles. Never raises — titling is
+        cosmetic and must not break the chat turn.
+        """
+        try:
+            user_turns = sum(1 for m in session.messages if m.role is MessageRole.USER)
+            if user_turns != 1:
+                return
+            if (session.title or "") not in self._DEFAULT_SESSION_TITLES:
+                return
+            text = " ".join((original_message or "").split())
+            if not text and file_context:
+                text = "Photo attachment"
+            if not text:
+                return
+            session.title = text if len(text) <= 48 else text[:47].rstrip() + "…"
+            self._sessions.save(session)
+        except Exception as exc:
+            logger.warning("Session retitle failed: %s", exc)
 
     def _attach_file_context(self, english_message: str, file: dict) -> str:
         """Ingest a chat-attached file via the ``upload_document`` tool and
@@ -260,13 +296,16 @@ class OrchestrationEngine:
         return f"{prompt}\n{fact}".strip()
 
     def _process_message_english(
-            self, session_id: str, user_message: str, file: dict = None
+            self, session_id: str, user_message: str, file: dict = None,
+            original_message: str | None = None, file_context: bool = False,
         ) -> OrchestratorResponse:
         """Inner ``process_message`` that operates in English only.
 
         Split out so the public ``process_message`` can wrap it with
         translation without polluting the existing logic with language
-        concerns. This function assumes ``user_message`` is in English.
+        concerns. This function assumes ``user_message`` is in English;
+        ``original_message`` carries the pre-translation text for
+        display purposes (e.g. session titles).
         """
         session = self._sessions.get(session_id)
         if session is None:
@@ -280,6 +319,12 @@ class OrchestrationEngine:
             ConversationMessage(role=MessageRole.USER, content=user_message)
         )
 
+        # Fresh session with a default title? Name it after the message.
+        self._maybe_retitle_session(
+            session, original_message if original_message is not None else user_message,
+            file_context=file_context,
+        )
+
         # Check if there's a pending confirmation to handle
         pending = self._confirmations.get_pending(session_id)
         if pending:
@@ -291,6 +336,20 @@ class OrchestrationEngine:
     def set_user_id(self, user_id: str | None) -> None:
         """Set the active user id for per-user approval scoping."""
         self._user_id = user_id
+
+    @property
+    def user_name(self) -> str | None:
+        """Display name used by the persona prompt (None → 'friend')."""
+        return self._user_name
+
+    def set_user_name(self, user_name: str | None) -> None:
+        """Set the display name greetings address the user by.
+
+        Blank/None resets to the 'friend' fallback. Only the name is
+        stored — never age, gender, or contact details.
+        """
+        cleaned = (user_name or "").strip()
+        self._user_name = cleaned[:100] or None
 
     # ------------------------------------------------------------------
     # Translation (V1 multilingual)

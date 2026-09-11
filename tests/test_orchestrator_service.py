@@ -1056,5 +1056,75 @@ class TestDomainModels(unittest.TestCase):
         self.assertEqual(ConfirmationType.EXTERNAL_ACTION.value, "external_action")
 
 
+class TestSessionRetitle(unittest.TestCase):
+    """First user message titles a default-named session (and only then)."""
+
+    def setUp(self):
+        import shutil
+        import tempfile as _tmp
+
+        from orchestrator_service.domain.models import ServiceTarget
+        from orchestrator_service.infrastructure.file_confirmation_store import (
+            FileConfirmationStore,
+        )
+        from orchestrator_service.infrastructure.session_store import (
+            FileSessionStore,
+        )
+        from orchestrator_service.infrastructure.service_clients import (
+            ServiceClientRouter,
+        )
+        from orchestrator_service.infrastructure.tool_registry import (
+            DefaultToolRegistry,
+        )
+
+        self.tmpdir = _tmp.mkdtemp()
+        sessions = FileSessionStore(base_dir=os.path.join(self.tmpdir, "sessions"))
+        confirmations = FileConfirmationStore(
+            base_dir=os.path.join(self.tmpdir, "confirmations"))
+        mock_llm = MagicMock()
+        mock_llm.chat.return_value = LLMResponse(content="ok", tool_calls=[])
+        mock_client = MagicMock()
+        mock_client.call_tool.return_value = {"results": []}
+        self.engine = OrchestrationEngine(
+            llm=mock_llm,
+            sessions=sessions,
+            confirmations=confirmations,
+            tool_registry=DefaultToolRegistry(),
+            service_router=ServiceClientRouter({ServiceTarget.DOCUMENT: mock_client}),
+            translation_service=TestOrchestrationEngine._no_op_translation(self),
+        )
+        self.sessions = sessions
+        self._shutil = shutil
+
+    def tearDown(self):
+        self._shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_first_message_retitles_default_session(self):
+        session = self.engine.create_session(title="New chat")
+        self.engine.process_message(session.session_id, "What is my aadhaar number?")
+        reloaded = self.sessions.get(session.session_id)
+        self.assertEqual(reloaded.title, "What is my aadhaar number?")
+
+    def test_custom_title_is_preserved(self):
+        session = self.engine.create_session(title="Tax stuff")
+        self.engine.process_message(session.session_id, "What is my aadhaar number?")
+        reloaded = self.sessions.get(session.session_id)
+        self.assertEqual(reloaded.title, "Tax stuff")
+
+    def test_second_message_does_not_retitle(self):
+        session = self.engine.create_session(title="New chat")
+        self.engine.process_message(session.session_id, "First question here")
+        self.engine.process_message(session.session_id, "Second question here")
+        reloaded = self.sessions.get(session.session_id)
+        self.assertEqual(reloaded.title, "First question here")
+
+    def test_long_title_is_truncated(self):
+        session = self.engine.create_session(title="")
+        self.engine.process_message(session.session_id, "x" * 100)
+        reloaded = self.sessions.get(session.session_id)
+        self.assertTrue(len(reloaded.title) <= 48)
+        self.assertTrue(reloaded.title.endswith("…"))
+
+
 if __name__ == "__main__":
     unittest.main()

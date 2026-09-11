@@ -657,10 +657,31 @@ class _DocumentRequestHandler(BaseHTTPRequestHandler):
         self._send_json(HTTPStatus.OK, _json_safe(result))
 
     def _tool_upload_document(self, args: dict) -> None:
-        self._send_json(
-            HTTPStatus.BAD_REQUEST,
-            {"error": "Use POST /documents (multipart) for uploads, not /tools/upload_document"},
-        )
+        """Ingest via the tools endpoint (parity with the MCP transport).
+
+        Accepts the registry schema: filename, content_base64 (+ optional
+        content_type, document_id, description, privacy, metadata).
+        IngestionError propagates to the dispatcher, which maps it to 400.
+        """
+        content_base64 = args.get("content_base64") or ""
+        filename = args.get("filename") or ""
+        if not filename or not content_base64:
+            raise IngestionError("filename and content_base64 are required")
+        try:
+            content = base64.b64decode(content_base64)
+        except (ValueError, base64.binascii.Error) as exc:
+            raise IngestionError(f"content_base64 is not valid base64: {exc}") from exc
+        request = self._request_from_payload(dict(args), content=content)
+        result = self.ingestion_service.ingest(request)
+        self._send_json(HTTPStatus.OK, {
+            "status": "successful",
+            "message": "Document uploaded successfully.",
+            "document_id": result.document_id,
+            "version": result.version,
+            "processing_status": result.processing_status.value,
+            "semantic_index_status": result.semantic_index_status.value,
+            "chunk_count": result.chunk_count,
+        })
 
     def _tool_list_templates(self, args: dict) -> None:
         self._send_json(HTTPStatus.NOT_IMPLEMENTED, {"error": "list_templates not implemented on this service"})

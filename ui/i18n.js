@@ -6,6 +6,13 @@
    key is missing in the active language, and falls back to the key
    itself when missing in English too — so missing keys are obvious
    in the rendered UI rather than silently swallowed.
+
+   SCOPE (V1): chrome ships en + hi tables and hi/en chips only.
+   ta/bn stay in SUPPORTED because the *backend* translates messages
+   for those languages — but with no shipped tables their chrome
+   renders in English (fallback above) and the switch highlights EN.
+   Ship ui/i18n/ta.json + bn.json and add chips before advertising
+   full Tamil/Bengali UI support.
    =================================================================== */
 (function () {
     'use strict';

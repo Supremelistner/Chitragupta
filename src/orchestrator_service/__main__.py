@@ -140,6 +140,14 @@ def main() -> None:
     )
     translation = get_translation_service()
 
+    # Pre-existing profile (if any) so restarts keep addressing the
+    # user by name even before the UI syncs again.
+    try:
+        from orchestrator_service.onboarding import load_profile
+        _existing = load_profile(config.profile_path or None)
+    except Exception:
+        _existing = None
+
     # Orchestration engine
     engine = OrchestrationEngine(
         llm=llm,
@@ -150,6 +158,9 @@ def main() -> None:
         confirmation_threshold=config.confirmation_threshold,
         translation_service=translation,
     )
+    if _existing is not None:
+        engine.set_user_name(_existing.display_name)
+        logger.info("Loaded profile for '%s'", _existing.display_name)
 
     # Start server
     mode = sys.argv[1] if len(sys.argv) > 1 else "http"

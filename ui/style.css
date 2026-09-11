@@ -41,8 +41,12 @@
     --radius-sm: 12px;
     --radius-lg: 24px;
 
-    --font: 'Noto Sans Devanagari', 'Noto Sans', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    --font-display: 'Noto Sans Devanagari', 'Noto Sans', system-ui, sans-serif;
+    /* Latin first: with 'Noto Sans Devanagari' first, Chromium drops the
+       first Latin glyphs after a Devanagari run (subset/fallback quirk —
+       "नमस्ते Tester" painted as "नमस्ते ester"). Per-character fallback
+       still resolves Devanagari from the second family, verified live. */
+    --font: 'Noto Sans', 'Noto Sans Devanagari', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    --font-display: 'Noto Sans', 'Noto Sans Devanagari', system-ui, sans-serif;
     --fs-base: 18px;
     --fs-lg: 22px;
     --fs-xl: 28px;

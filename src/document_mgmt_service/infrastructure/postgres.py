@@ -17,6 +17,37 @@ from document_mgmt_service.domain.ports import PostgreSQLDocumentRepository
 from document_mgmt_service.schemas import apply_migrations
 
 
+class _ClosingConnection:
+    """Context manager yielding a psycopg connection, closing it on exit.
+
+    psycopg3's own context manager commits/rolls back on exit but
+    intentionally leaves the TCP connection OPEN — so every repository
+    call leaked one connection until Postgres hit max_connections and
+    started refusing. This wrapper preserves the commit/rollback
+    semantics and then closes the socket. Attribute access delegates
+    to the real connection, so existing call sites are untouched.
+    """
+
+    def __init__(self, connection: Any) -> None:
+        self._connection = connection
+
+    def __enter__(self) -> Any:
+        self._connection.__enter__()
+        return self._connection
+
+    def __exit__(self, *exc_info: Any) -> Any:
+        try:
+            return self._connection.__exit__(*exc_info)
+        finally:
+            try:
+                self._connection.close()
+            except Exception:
+                pass
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._connection, name)
+
+
 def create_psycopg_connection_factory(
     dsn: str,
     *,
@@ -28,15 +59,18 @@ def create_psycopg_connection_factory(
     ``connect_timeout`` guards against a hanging TCP connect so the
     service can fail fast when the database container is not ready.
     ``application_name`` shows up in ``pg_stat_activity`` for easier
-    debugging from inside the container.
+    debugging from inside the container. Connections are wrapped so
+    the ``with factory() as conn`` pattern closes them on exit.
     """
     def factory() -> Any:
         import psycopg  # type: ignore[import-not-found]
 
-        return psycopg.connect(
-            dsn,
-            connect_timeout=connect_timeout,
-            application_name=application_name,
+        return _ClosingConnection(
+            psycopg.connect(
+                dsn,
+                connect_timeout=connect_timeout,
+                application_name=application_name,
+            )
         )
 
     return factory

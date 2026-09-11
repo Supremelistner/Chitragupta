@@ -61,6 +61,26 @@ def create_app(
     except ImportError:
         pass
 
+    # ─── No-store for UI assets ──────────────────────────────────
+    # Stale cached app.js/i18n JSON once left users running fixed bugs
+    # (and fixed bugs looking broken). Single-user LAN app: always
+    # refetch the shell + scripts (~30KB, negligible cost). API JSON
+    # responses are unaffected (only "/" and "/static/*" match).
+    try:
+        from starlette.middleware.base import BaseHTTPMiddleware
+
+        class _NoCacheStaticMiddleware(BaseHTTPMiddleware):
+            async def dispatch(self, request, call_next):  # noqa: ANN001, ANN202
+                response = await call_next(request)
+                path = request.url.path
+                if path == "/" or path.startswith("/static/"):
+                    response.headers["Cache-Control"] = "no-store"
+                return response
+
+        app.add_middleware(_NoCacheStaticMiddleware)
+    except ImportError:
+        pass
+
     # ─── Health ────────────────────────────────────────────────────
     @app.get("/api/healthz")
     async def healthz():
@@ -224,6 +244,40 @@ def create_app(
             "source": pref.source,
             "target": pref.target,
         }
+
+    # ─── Profile (display name for the persona) ───────────────────
+    @app.get("/api/profile")
+    async def get_profile():
+        """Return the persona's display name for the user.
+
+        Prefers the live engine value, falling back to the persisted
+        profile file (covers fresh restarts before any UI sync).
+        """
+        from orchestrator_service.onboarding import load_profile
+        name = engine.user_name
+        if not name:
+            profile = load_profile(config.profile_path or None)
+            name = profile.display_name if profile else None
+        return {"display_name": name}
+
+    @app.post("/api/profile")
+    async def set_profile(request: Request):
+        """Set the display name (from the UI profile modal / settings).
+
+        Persists to the profile file and applies to the live engine so
+        the persona addresses the user by name immediately. Only the
+        name is stored — never contact details.
+        """
+        from orchestrator_service.onboarding import save_profile
+        body = await request.json()
+        name = (body.get("display_name") or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="display_name is required")
+        if len(name) > 100:
+            raise HTTPException(status_code=400, detail="display_name too long (max 100)")
+        save_profile(name, path=config.profile_path or None)
+        engine.set_user_name(name)
+        return {"display_name": name}
 
     # ─── Confirm ───────────────────────────────────────────────────
     @app.post("/api/confirm")

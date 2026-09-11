@@ -76,7 +76,9 @@ class MCPServer:
             message = args.get("message", "")
             if not session_id or not message:
                 return self._error(request_id, -32602, "session_id and message required")
-            response = self._engine.process_message(session_id, message)
+            response = self._engine.process_message(
+                session_id, message, user_id=args.get("user_id") or None
+            )
             return self._tool_result(request_id, {
                 "session_id": response.session_id,
                 "message": response.message,

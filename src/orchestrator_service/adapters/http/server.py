@@ -255,8 +255,12 @@ def create_app(
 
     # ─── Sessions ──────────────────────────────────────────────────
     @app.get("/api/sessions")
-    async def list_sessions():
-        sessions = engine.list_sessions()
+    async def list_sessions(request: Request):
+        try:
+            user_id = _current_user(request)["sub"]
+        except HTTPException:
+            user_id = None
+        sessions = engine.list_sessions(user_id=user_id)
         return {
             "sessions": [
                 {
@@ -285,9 +289,15 @@ def create_app(
         )
 
     @app.get("/api/sessions/{session_id}")
-    async def get_session(session_id: str):
+    async def get_session(session_id: str, request: Request):
         session = engine.get_session(session_id)
         if session is None:
+            raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+        try:
+            user_id = _current_user(request)["sub"]
+        except HTTPException:
+            user_id = None
+        if user_id and session.user_id and session.user_id != user_id:
             raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
         return {
             "session_id": session.session_id,
@@ -301,12 +311,28 @@ def create_app(
         }
 
     @app.delete("/api/sessions/{session_id}")
-    async def delete_session(session_id: str):
+    async def delete_session(session_id: str, request: Request):
+        try:
+            user_id = _current_user(request)["sub"]
+        except HTTPException:
+            user_id = None
+        if user_id:
+            session = engine.get_session(session_id)
+            if session is not None and session.user_id and session.user_id != user_id:
+                raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
         ok = engine.delete_session(session_id)
         return {"deleted": ok}
 
     @app.post("/api/sessions/{session_id}/archive")
-    async def archive_session(session_id: str):
+    async def archive_session(session_id: str, request: Request):
+        try:
+            user_id = _current_user(request)["sub"]
+        except HTTPException:
+            user_id = None
+        if user_id:
+            session = engine.get_session(session_id)
+            if session is not None and session.user_id and session.user_id != user_id:
+                raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
         ok = engine.archive_session(session_id)
         return {"archived": ok}
 
@@ -331,14 +357,19 @@ def create_app(
             message = body.get("message", "")
         if not session_id or (not message and file is None):
             raise HTTPException(status_code=400, detail="session_id and message (or file) required")
+        try:
+            chat_user_id = _current_user(request)["sub"]
+        except HTTPException:
+            chat_user_id = None
         if file is not None:
             message = await _ingest_chat_attachment(
                 message,
                 filename=file.get("filename") or "attachment",
                 content=file.get("bytes") or b"",
                 content_type=file.get("content_type") or "application/octet-stream",
+                user_id=chat_user_id or "",
             )
-        response = engine.process_message(session_id, message)
+        response = engine.process_message(session_id, message, user_id=chat_user_id)
         return {
             "session_id": response.session_id,
             "message": response.message,
@@ -414,13 +445,17 @@ def create_app(
 
     # ─── Expiring documents (proactive banner, no chat turn) ─────
     @app.get("/api/expiring")
-    async def expiring(within_days: int = 30):
+    async def expiring(request: Request, within_days: int = 30):
         """Documents expiring within N days (overdue included).
 
         Powers the welcome-screen banner. Session-independent; failures
         collapse to an empty list so the banner just stays hidden.
         """
-        return engine.list_expiring_documents(within_days=within_days)
+        try:
+            exp_user_id = _current_user(request)["sub"]
+        except HTTPException:
+            exp_user_id = None
+        return engine.list_expiring_documents(within_days=within_days, user_id=exp_user_id)
 
     # ─── Profile (display name for the persona) ───────────────────
     @app.get("/api/profile")
@@ -611,6 +646,7 @@ def create_app(
         filename: str,
         content: bytes,
         content_type: str,
+        user_id: str = "",
     ) -> str:
         """Ingest a file attached to a chat message, then annotate the message.
 
@@ -628,6 +664,7 @@ def create_app(
                 content=content,
                 content_type=content_type,
                 description=(message or "")[:500],
+                user_id=user_id,
             )
         except HTTPException as exc:
             note = f"[System: attached file '{filename}' could not be ingested ({exc.detail}).]"

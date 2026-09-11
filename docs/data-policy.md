@@ -60,12 +60,16 @@ working in this repo.
 ### Red-list — never touch contents, never paste, never commit
 
 - `.env` (secret *values* — tokens, DSNs, `ENCRYPTION_MASTER_KEY`,
-  passwords). Key *names* from `.env.example` may be referenced; values
-  must never be printed, logged, or pasted into chat.
+  `CHITRAGUPTA_JWT_SECRET`, passwords). Key *names* from `.env.example`
+  may be referenced; values must never be printed, logged, or pasted
+  into chat.
 - `data/Sample/` — real owner documents. Never open, preview, OCR, upload,
   or copy — not even locally.
 - `data/files/` — stored document binaries (all versions).
 - `data/sessions/` and any confirmations store — conversation history.
+- `src/data/users/`, `data/users/` — password hashes. Never dump.
+- `data/global-blobs/` — cross-device backup blobs (owner PII). Never
+  open contents; manifest *counts* only when diagnosing sync.
 - `data/logs/`, `data/.service_pids` — may contain PII/paths; read only
   file *names*/sizes when diagnosing, never dump contents into chat.
 - `data/translation_cache.json` — may contain user text. Do not open.

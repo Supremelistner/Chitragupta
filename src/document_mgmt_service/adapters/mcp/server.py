@@ -168,7 +168,10 @@ class MCPServer:
             return self._tool_result(request_id, response.payload)
 
         if name == "list_documents":
-            return self._tool_result(request_id, self._access_service.list_documents())
+            return self._tool_result(
+                request_id,
+                self._access_service.list_documents(user_id=arguments.get("user_id") or None),
+            )
 
         if name == "search_documents":
             query = str(arguments.get("query") or "")
@@ -178,6 +181,7 @@ class MCPServer:
                 query,
                 limit=int(arguments.get("limit", 10)),
                 requestor=str(arguments.get("requestor")) if arguments.get("requestor") else None,
+                user_id=arguments.get("user_id") or None,
             )
             return self._tool_result(
                 request_id,
@@ -194,6 +198,7 @@ class MCPServer:
                 document_id=arguments.get("document_id"),
                 version=int(arguments["version"]) if arguments.get("version") is not None else None,
                 requestor=str(arguments.get("requestor")) if arguments.get("requestor") else None,
+                user_id=arguments.get("user_id") or None,
             )
             return self._tool_result(
                 request_id,
@@ -214,6 +219,7 @@ class MCPServer:
                 query=query,
                 limit=int(arguments.get("limit", 5)),
                 requestor=str(arguments.get("requestor")) if arguments.get("requestor") else None,
+                user_id=arguments.get("user_id") or None,
             )
             return self._tool_result(
                 request_id,
@@ -230,6 +236,7 @@ class MCPServer:
                     version,
                     page_number,
                     requestor=str(arguments.get("requestor")) if arguments.get("requestor") else None,
+                    user_id=arguments.get("user_id") or None,
                 )
                 return self._tool_result(request_id, page_response.payload)
             except ApprovalRequiredError as exc:
@@ -249,6 +256,7 @@ class MCPServer:
                     document_id,
                     version,
                     requestor=str(arguments.get("requestor")) if arguments.get("requestor") else None,
+                    user_id=arguments.get("user_id") or None,
                 )
                 return self._tool_result(request_id, response.payload)
             except ApprovalRequiredError as exc:
@@ -271,6 +279,7 @@ class MCPServer:
                     intent=intent,
                     query=str(query) if query is not None else None,
                     requestor=str(arguments.get("requestor")) if arguments.get("requestor") else None,
+                    user_id=arguments.get("user_id") or None,
                 ),
             )
 
@@ -299,6 +308,7 @@ class MCPServer:
                     version=version,
                     field_name=field,
                     confirm=confirm,
+                    user_id=arguments.get("user_id") or None,
                 )
             except FieldAccessError as exc:
                 return self._tool_result(
@@ -328,6 +338,7 @@ class MCPServer:
                 description=arguments.get("description"),
                 privacy_hint=self._parse_privacy(arguments.get("privacy")),
                 metadata=metadata,
+                user_id=arguments.get("user_id") or None,
             )
         )
         return {
@@ -350,6 +361,7 @@ class MCPServer:
         description: str | None,
         privacy_hint: DocumentPrivacyClassification | None,
         metadata: dict[str, Any],
+        user_id: str | None = None,
     ):
         from document_mgmt_service.domain.models import DocumentIngestionRequest
 
@@ -361,6 +373,7 @@ class MCPServer:
             description_hint=description,
             privacy_hint=privacy_hint,
             metadata=metadata,
+            user_id=user_id or "__local__",
         )
 
     def _tool_spec(self, name: str, description: str) -> dict[str, Any]:

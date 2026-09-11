@@ -24,6 +24,7 @@ from orchestrator_service.domain.models import (
     ConversationMessage,
     MessageRole,
     OrchestratorResponse,
+    ServiceTarget,
     Session,
     SessionStatus,
     ToolCall,
@@ -179,7 +180,7 @@ class OrchestrationEngine:
     def archive_session(self, session_id: str) -> bool:
         return self._sessions.archive(session_id)
 
-    def list_expiring_documents(self, within_days: int = 30) -> dict:
+    def list_expiring_documents(self, within_days: int = 30, user_id: str | None = None) -> dict:
         """Documents expiring soon, for the proactive banner (no LLM turn).
 
         Calls the document service directly. Never raises for transport
@@ -193,8 +194,11 @@ class OrchestrationEngine:
             target = self._registry.get_service("list_expiring_documents")
             if target is None:
                 return {"results": []}
+            args: dict[str, Any] = {"within_days": within_days}
+            if user_id:
+                args["user_id"] = user_id
             result = self._router.call_tool(
-                target, "list_expiring_documents", {"within_days": within_days}
+                target, "list_expiring_documents", args
             )
             if not isinstance(result, dict) or result.get("error"):
                 return {"results": []}
@@ -204,7 +208,8 @@ class OrchestrationEngine:
             return {"results": []}
 
     def process_message(
-        self, session_id: str, user_message: str, file: dict | None = None
+        self, session_id: str, user_message: str, file: dict | None = None,
+        user_id: str | None = None,
     ) -> OrchestratorResponse:
         """Process a user message within a session.
 
@@ -231,11 +236,11 @@ class OrchestrationEngine:
         english_message = inbound.text
 
         if file is not None:
-            english_message = self._attach_file_context(english_message, file)
+            english_message = self._attach_file_context(english_message, file, user_id=user_id)
 
         response = self._process_message_english(
             session_id, english_message, original_message=user_message,
-            file_context=bool(file),
+            file_context=bool(file), user_id=user_id,
         )
         # Translate outbound: present the response in the user's
         # preferred UI language.
@@ -274,7 +279,7 @@ class OrchestrationEngine:
         except Exception as exc:
             logger.warning("Session retitle failed: %s", exc)
 
-    def _attach_file_context(self, english_message: str, file: dict) -> str:
+    def _attach_file_context(self, english_message: str, file: dict, user_id: str | None = None) -> str:
         """Ingest a chat-attached file via the ``upload_document`` tool and
         annotate the message with the outcome.
 
@@ -295,12 +300,16 @@ class OrchestrationEngine:
             target = self._registry.get_service("upload_document")
             if target is None:
                 raise RuntimeError("upload_document tool is not registered")
-            result = self._router.call_tool(target, "upload_document", {
+            args: dict[str, Any] = {
                 "filename": filename,
                 "content_base64": base64.b64encode(content).decode("ascii"),
                 "content_type": file.get("content_type") or "application/octet-stream",
                 "description": english_message[:500],
-            })
+            }
+            result = self._router.call_tool(
+                target, "upload_document",
+                self._scoped_args(None, target, args, fallback_user_id=user_id),
+            )
         except Exception as exc:
             logger.warning("Chat attachment ingest failed: %s", exc)
             note = (
@@ -322,6 +331,7 @@ class OrchestrationEngine:
     def _process_message_english(
             self, session_id: str, user_message: str, file: dict = None,
             original_message: str | None = None, file_context: bool = False,
+            user_id: str | None = None,
         ) -> OrchestratorResponse:
         """Inner ``process_message`` that operates in English only.
 
@@ -337,6 +347,18 @@ class OrchestrationEngine:
                 session_id=session_id,
                 message=f"Session {session_id} not found. Please create a new session.",
             )
+
+        # Multi-user binding: a token user takes ownership of unowned
+        # sessions; touching another account's session is refused.
+        if user_id:
+            if session.user_id and session.user_id != user_id:
+                return OrchestratorResponse(
+                    session_id=session_id,
+                    message="This chat belongs to another account. Please start a new chat.",
+                )
+            if not session.user_id:
+                session.user_id = user_id
+                self._sessions.save(session)
 
         # Add user message to session
         session.messages.append(
@@ -802,7 +824,8 @@ class OrchestrationEngine:
                 target = self._registry.get_service(tool_call.tool_name)
                 if target:
                     result = self._router.call_tool(
-                        target, tool_call.tool_name, tool_call.arguments
+                        target, tool_call.tool_name,
+                        self._scoped_args(session, target, tool_call.arguments),
                     )
                 else:
                     result = {"error": True, "message": f"Unknown tool: {tool_call.tool_name}"}
@@ -898,7 +921,8 @@ class OrchestrationEngine:
 
         if target:
             result = self._router.call_tool(
-                target, tool_call.tool_name, tool_call.arguments
+                target, tool_call.tool_name,
+                self._scoped_args(session, target, tool_call.arguments),
             )
             tool_call.result = result
             tool_call.status = (
@@ -975,6 +999,26 @@ class OrchestrationEngine:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _scoped_args(
+        self, session: Session | None, target: Any, args: dict[str, Any],
+        fallback_user_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Stamp the session's user_id onto document-service tool args.
+
+        Only document tools are touched (other services would choke on
+        unknown params); an explicit caller-supplied user_id always wins.
+        """
+        try:
+            is_document = str(getattr(target, "value", target)) == ServiceTarget.DOCUMENT.value
+        except Exception:
+            is_document = False
+        if not is_document or (args and args.get("user_id")):
+            return args
+        user_id = (getattr(session, "user_id", "") or "") or (self._user_id or "") or (fallback_user_id or "")
+        if not user_id:
+            return args
+        return {**args, "user_id": user_id}
 
     def _confirmation_message(
         self,

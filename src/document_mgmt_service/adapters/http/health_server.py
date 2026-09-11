@@ -147,6 +147,22 @@ class _DocumentRequestHandler(BaseHTTPRequestHandler):
     ingestion_service: IngestionService
     access_service: DocumentAccessService
 
+    def _request_user_id(self, args: dict | None = None) -> str | None:
+        """Tenant for this request: explicit arg wins, then X-User-Id header."""
+        if args and args.get("user_id"):
+            return str(args["user_id"])
+        headers = getattr(self, "headers", None)
+        header = (headers.get("X-User-Id") or "").strip() if headers else ""
+        return header or None
+
+    def _owned_record(self, document_id: str, version: int, user_id: str | None):
+        """Load-or-404 with ownership enforcement (cross-user reads 404)."""
+        try:
+            return self.access_service._load_record(document_id, version, user_id=user_id)
+        except KeyError as exc:
+            self._send_json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
+            return None
+
     def do_GET(self) -> None:  # noqa: N802
         if self.path in {"/healthz", "/readyz", "/"}:
             self._send_json(HTTPStatus.OK, self.health_service.report().to_dict())
@@ -162,6 +178,8 @@ class _DocumentRequestHandler(BaseHTTPRequestHandler):
 
         metadata_match = re.match(r"^/documents/(?P<document_id>[^/]+)/versions/(?P<version>\d+)/metadata$", urlparse(self.path).path)
         if metadata_match:
+            if self._owned_record(metadata_match.group("document_id"), int(metadata_match.group("version")), self._request_user_id()) is None:
+                return
             self._handle_metadata_retrieval(metadata_match.group("document_id"), int(metadata_match.group("version")))
             return
 
@@ -196,20 +214,26 @@ class _DocumentRequestHandler(BaseHTTPRequestHandler):
 
         ocr_match = re.match(r"^/documents/(?P<document_id>[^/]+)/versions/(?P<version>\d+)/ocr$", urlparse(self.path).path)
         if ocr_match:
+            if self._owned_record(ocr_match.group("document_id"), int(ocr_match.group("version")), self._request_user_id()) is None:
+                return
             self._handle_ocr_retrieval(ocr_match.group("document_id"), int(ocr_match.group("version")))
             return
 
         image_match = re.match(r"^/documents/(?P<document_id>[^/]+)/versions/(?P<version>\d+)/image$", urlparse(self.path).path)
         if image_match:
+            if self._owned_record(image_match.group("document_id"), int(image_match.group("version")), self._request_user_id()) is None:
+                return
             self._handle_image_retrieval(image_match.group("document_id"), int(image_match.group("version")))
             return
 
         file_match = re.match(r"^/documents/(?P<document_id>[^/]+)/versions/(?P<version>\d+)/file$", urlparse(self.path).path)
         if file_match:
+            _fuid = self._request_user_id()
             try:
                 response = self.access_service.retrieve_document(
                     file_match.group("document_id"),
                     int(file_match.group("version")),
+                    user_id=_fuid,
                 )
             except ApprovalRequiredError as exc:
                 self._send_json(
@@ -510,6 +534,7 @@ class _DocumentRequestHandler(BaseHTTPRequestHandler):
                 flagged_record = DocumentVersionRecord(
                     document_id=record.document_id,
                     version=record.version,
+                    user_id=getattr(record, "user_id", "__local__") or "__local__",
                     original_filename=record.original_filename,
                     content_type=record.content_type,
                     file_kind=record.file_kind,
@@ -643,7 +668,7 @@ class _DocumentRequestHandler(BaseHTTPRequestHandler):
             )
             return
         within_days = min(365, max(1, within_days))
-        results = self.access_service.list_expiring_documents(within_days=within_days)
+        results = self.access_service.list_expiring_documents(within_days=within_days, user_id=self._request_user_id(args))
         self._send_json(HTTPStatus.OK, results)
 
     def _tool_search_documents(self, args: dict) -> None:
@@ -652,6 +677,7 @@ class _DocumentRequestHandler(BaseHTTPRequestHandler):
             query,
             limit=int(args.get("limit", 10)),
             requestor=self._first_context(args),
+            user_id=self._request_user_id(args),
         )
         self._send_json(HTTPStatus.OK, results)
 
@@ -663,6 +689,7 @@ class _DocumentRequestHandler(BaseHTTPRequestHandler):
             document_id=args.get("document_id"),
             version=int(args["version"]) if args.get("version") is not None else None,
             requestor=self._first_context(args),
+            user_id=self._request_user_id(args),
         )
         self._send_json(HTTPStatus.OK, results)
 
@@ -674,6 +701,7 @@ class _DocumentRequestHandler(BaseHTTPRequestHandler):
             document_id=document_id, version=version, query=query,
             limit=int(args.get("limit", 5)),
             requestor=self._first_context(args),
+            user_id=self._request_user_id(args),
         )
         self._send_json(HTTPStatus.OK, results)
 
@@ -728,6 +756,7 @@ class _DocumentRequestHandler(BaseHTTPRequestHandler):
                     version=version,
                     field_name=field,
                     confirm=False,
+                    user_id=self._request_user_id(args),
                 )
             except FieldAccessError as exc:
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
@@ -754,6 +783,7 @@ class _DocumentRequestHandler(BaseHTTPRequestHandler):
                 version=version,
                 field_name=field,
                 confirm=True,
+                user_id=self._request_user_id(args),
             )
         except FieldAccessError as exc:
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
@@ -800,7 +830,7 @@ class _DocumentRequestHandler(BaseHTTPRequestHandler):
         document_id = self._required_field(args, "document_id")
         version = int(self._required_field(args, "version"))
         try:
-            response = self.access_service.retrieve_document(document_id, version)
+            response = self.access_service.retrieve_document(document_id, version, user_id=self._request_user_id(args))
         except (ApprovalRequiredError, AccessDeniedError) as exc:
             self._send_json(HTTPStatus.FORBIDDEN, {
                 "error": str(exc),
@@ -817,7 +847,7 @@ class _DocumentRequestHandler(BaseHTTPRequestHandler):
         document_id = self._required_field(args, "document_id")
         version = int(self._required_field(args, "version"))
         try:
-            record = self.access_service._load_record(document_id, version)
+            record = self.access_service._load_record(document_id, version, user_id=self._request_user_id(args))
         except KeyError as exc:
             self._send_json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
             return
@@ -827,7 +857,14 @@ class _DocumentRequestHandler(BaseHTTPRequestHandler):
         document_id = self._required_field(args, "document_id")
         version = int(self._required_field(args, "version"))
         try:
-            response = self.access_service.retrieve_page(document_id, version)
+            page_number = int(args.get("page_number", 1))
+        except (TypeError, ValueError):
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "page_number must be an integer"})
+            return
+        try:
+            response = self.access_service.get_page(
+                document_id, version, page_number, user_id=self._request_user_id(args)
+            )
         except (ApprovalRequiredError, AccessDeniedError) as exc:
             self._send_json(HTTPStatus.FORBIDDEN, {
                 "error": str(exc),
@@ -844,7 +881,7 @@ class _DocumentRequestHandler(BaseHTTPRequestHandler):
         document_id = self._required_field(args, "document_id")
         version = int(self._required_field(args, "version"))
         try:
-            payload = self.access_service.get_document_metadata(document_id, version)
+            payload = self.access_service.get_document_metadata(document_id, version, user_id=self._request_user_id(args))
         except KeyError as exc:
             self._send_json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
             return
@@ -854,7 +891,7 @@ class _DocumentRequestHandler(BaseHTTPRequestHandler):
         document_id = self._required_field(args, "document_id")
         version = int(self._required_field(args, "version"))
         try:
-            payload = self.access_service.get_document_description(document_id, version)
+            payload = self.access_service.get_document_description(document_id, version, user_id=self._request_user_id(args))
         except KeyError as exc:
             self._send_json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
             return

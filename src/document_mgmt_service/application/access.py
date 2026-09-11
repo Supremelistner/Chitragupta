@@ -229,8 +229,8 @@ class DocumentAccessService:
         """
         return self._repository
 
-    def get_document_metadata(self, document_id: str, version: int) -> AccessResponse:
-        record = self._load_record(document_id, version)
+    def get_document_metadata(self, document_id: str, version: int, user_id: str | None = None) -> AccessResponse:
+        record = self._load_record(document_id, version, user_id=user_id)
         request = AccessRequest(document_id=document_id, version=version, intent=AccessIntent.METADATA)
         decision = self._policy.evaluate(record=record, request=request)
         self._audit(record, request, decision)
@@ -239,8 +239,8 @@ class DocumentAccessService:
         payload["access_reason"] = decision.reason
         return AccessResponse(decision=decision, payload=payload)
 
-    def get_document_description(self, document_id: str, version: int) -> AccessResponse:
-        record = self._load_record(document_id, version)
+    def get_document_description(self, document_id: str, version: int, user_id: str | None = None) -> AccessResponse:
+        record = self._load_record(document_id, version, user_id=user_id)
         request = AccessRequest(document_id=document_id, version=version, intent=AccessIntent.DESCRIPTION)
         decision = self._policy.evaluate(record=record, request=request)
         self._audit(record, request, decision)
@@ -253,8 +253,8 @@ class DocumentAccessService:
         }
         return AccessResponse(decision=decision, payload=payload)
 
-    def get_metadata(self, document_id: str, version: int) -> AccessResponse:
-        return self.get_document_metadata(document_id, version)
+    def get_metadata(self, document_id: str, version: int, user_id: str | None = None) -> AccessResponse:
+        return self.get_document_metadata(document_id, version, user_id=user_id)
 
     def list_documents(self, user_id: str | None = None) -> dict[str, Any]:
         documents = self._repository.list_documents(user_id=user_id) if user_id else self._repository.list_documents()
@@ -289,7 +289,7 @@ class DocumentAccessService:
         results: list[dict[str, Any]] = []
         top_decision = AccessDecision(AccessAction.ALLOW, "document-level summaries are low-risk")
         for hit in hits:
-            record = self._load_record(hit.document_id, hit.version)
+            record = self._load_record(hit.document_id, hit.version, user_id=user_id)
             request = AccessRequest(
                 document_id=hit.document_id,
                 version=hit.version,
@@ -328,7 +328,7 @@ class DocumentAccessService:
         hits = self._search.search_content(query, limit=limit, document_id=document_id, version=version, user_id=user_id)
         results: list[dict[str, Any]] = []
         for hit in hits:
-            record = self._load_record(hit.document_id, hit.version)
+            record = self._load_record(hit.document_id, hit.version, user_id=user_id)
             request = AccessRequest(
                 document_id=hit.document_id,
                 version=hit.version,
@@ -366,7 +366,7 @@ class DocumentAccessService:
         )
 
     def get_evidence(self, *, document_id: str, version: int, query: str, limit: int = 5, requestor: str | None = None, user_id: str | None = None) -> dict[str, Any]:
-        record = self._load_record(document_id, version)
+        record = self._load_record(document_id, version, user_id=user_id)
         request = AccessRequest(
             document_id=document_id,
             version=version,
@@ -403,8 +403,8 @@ class DocumentAccessService:
             user_id=user_id,
         )
 
-    def get_page(self, document_id: str, version: int, page_number: int, *, requestor: str | None = None) -> AccessResponse:
-        record = self._load_record(document_id, version)
+    def get_page(self, document_id: str, version: int, page_number: int, *, requestor: str | None = None, user_id: str | None = None) -> AccessResponse:
+        record = self._load_record(document_id, version, user_id=user_id)
         request = AccessRequest(
             document_id=document_id,
             version=version,
@@ -433,8 +433,8 @@ class DocumentAccessService:
         }
         return AccessResponse(decision=decision, payload=payload)
 
-    def get_document(self, document_id: str, version: int, *, requestor: str | None = None) -> AccessResponse:
-        record = self._load_record(document_id, version)
+    def get_document(self, document_id: str, version: int, *, requestor: str | None = None, user_id: str | None = None) -> AccessResponse:
+        record = self._load_record(document_id, version, user_id=user_id)
         request = AccessRequest(
             document_id=document_id,
             version=version,
@@ -460,8 +460,8 @@ class DocumentAccessService:
         }
         return AccessResponse(decision=decision, payload=payload)
 
-    def retrieve_document(self, document_id: str, version: int, *, requestor: str | None = None) -> AccessResponse:
-        return self.get_document(document_id, version, requestor=requestor)
+    def retrieve_document(self, document_id: str, version: int, *, requestor: str | None = None, user_id: str | None = None) -> AccessResponse:
+        return self.get_document(document_id, version, requestor=requestor, user_id=user_id)
 
     def request_sensitive_access(
         self,
@@ -471,8 +471,9 @@ class DocumentAccessService:
         intent: AccessIntent,
         query: str | None = None,
         requestor: str | None = None,
+        user_id: str | None = None,
     ) -> dict[str, Any]:
-        record = self._load_record(document_id, version)
+        record = self._load_record(document_id, version, user_id=user_id)
         request = AccessRequest(
             document_id=document_id,
             version=version,
@@ -492,10 +493,16 @@ class DocumentAccessService:
             "approval_required": decision.approval_required,
         }
 
-    def _load_record(self, document_id: str, version: int) -> DocumentVersionRecord:
+    def _load_record(self, document_id: str, version: int, user_id: str | None = None) -> DocumentVersionRecord:
         record = self._repository.get_version(document_id, version)
         if record is None:
             raise KeyError(f"Document {document_id} version {version} not found")
+        if user_id:
+            owner = getattr(record, "user_id", "__local__") or "__local__"
+            # Legacy single-user rows (__local__) stay visible during the
+            # transition; anything owned by another user 404s (no oracle).
+            if owner != "__local__" and owner != user_id:
+                raise KeyError(f"Document {document_id} version {version} not found")
         return record
 
     def _audit(

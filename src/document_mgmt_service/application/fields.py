@@ -135,6 +135,7 @@ def get_field_value(
     version: int,
     field_name: str,
     confirm: bool = False,
+    user_id: str | None = None,
 ) -> FieldValueResult:
     """Look up a field value on a document version.
 
@@ -149,6 +150,12 @@ def get_field_value(
         raise FieldAccessError(
             f"Document {document_id} v{version} not found"
         )
+    if user_id:
+        owner = getattr(record, "user_id", "__local__") or "__local__"
+        if owner != "__local__" and owner != user_id:
+            raise FieldAccessError(
+                f"Document {document_id} v{version} not found"
+            )
     extracted = record.extracted_fields or {}
     available = sorted(extracted.keys())
     # Run the resolver so typos / wrong-case / wrong-format names still

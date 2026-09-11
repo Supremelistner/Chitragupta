@@ -233,8 +233,8 @@ class SemanticSearchService:
         self._store.upsert(chunks=chunks, vectors=vectors)
         return len(chunks)
 
-    def delete_document(self, document_id: str, version: int | None = None) -> None:
-        self._store.delete_document(document_id, version)
+    def delete_document(self, document_id: str, version: int | None = None, user_id: str | None = None) -> None:
+        self._store.delete_document(document_id, version, user_id=user_id)
 
     def search_documents(
         self,

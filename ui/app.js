@@ -281,8 +281,12 @@
     async function applyLanguagePreferenceToCurrentSession() {
         if (!state.currentSessionId) return;
         const lang = window.I18N.getLang();
+        // Sessions persist their preference server-side; skip the POST
+        // when we already pushed this language for this session.
+        state.pushedLangBySession = state.pushedLangBySession || {};
+        if (state.pushedLangBySession[state.currentSessionId] === lang) return;
         try {
-            await fetch(API + '/api/language', {
+            const r = await fetch(API + '/api/language', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -291,6 +295,7 @@
                     target: lang,
                 }),
             });
+            if (r.ok) state.pushedLangBySession[state.currentSessionId] = lang;
         } catch (e) {
             console.warn('applyLanguagePreferenceToCurrentSession failed', e);
         }

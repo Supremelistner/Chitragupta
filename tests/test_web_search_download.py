@@ -67,12 +67,26 @@ class TestDownloadModels(unittest.TestCase):
         self.assertEqual(DownloadStatus.UNSUPPORTED.value, "unsupported")
 
 
+PUBLIC_DNS_ANSWER = [(2, 1, 6, "", ("93.184.216.34", 0))]
+_DNS_PATCH_TARGET = "web_search_service.infrastructure.url_guard.getaddrinfo"
+
+
+def _patch_dns(testcase: unittest.TestCase):
+    """Pin DNS to a public IP so SSRF-guard tests don't need the network."""
+    patcher = patch("web_search_service.infrastructure.url_guard.getaddrinfo")
+    mock_resolve = patcher.start()
+    mock_resolve.return_value = PUBLIC_DNS_ANSWER
+    testcase.addCleanup(patcher.stop)
+    return mock_resolve
+
+
 class TestHttpDownloader(unittest.TestCase):
     """Infrastructure adapter tests."""
 
     def setUp(self):
         self._tmpdir = tempfile.mkdtemp()
         self._downloader = HttpDownloader(download_dir=self._tmpdir)
+        _patch_dns(self)
 
     def tearDown(self):
         import shutil
@@ -234,6 +248,7 @@ class TestDownloadEndToEnd(unittest.TestCase):
     def setUp(self):
         self._tmpdir = tempfile.mkdtemp()
         self._downloader = HttpDownloader(download_dir=self._tmpdir)
+        _patch_dns(self)
 
     def tearDown(self):
         import shutil
@@ -260,6 +275,93 @@ class TestDownloadEndToEnd(unittest.TestCase):
         self.assertEqual(result.filename, "lic_claim_form.pdf")
         self.assertEqual(result.content_length, 16)
         self.assertTrue(Path(result.file_path).exists())
+
+
+class TestUrlGuard(unittest.TestCase):
+    """SSRF guard: schemes, resolution, and routability."""
+
+    def test_rejects_non_http_scheme(self):
+        from web_search_service.infrastructure.url_guard import (
+            BlockedHostError, validate_url,
+        )
+        for bad in ("file:///etc/passwd", "gopher://example.com/x", "ftp://example.com/f"):
+            with self.assertRaises(BlockedHostError):
+                validate_url(bad)
+
+    def test_rejects_unresolvable_host(self):
+        import socket as std_socket
+        from web_search_service.infrastructure.url_guard import (
+            BlockedHostError, validate_url,
+        )
+        with patch(_DNS_PATCH_TARGET) as mock_resolve:
+            mock_resolve.side_effect = std_socket.gaierror("nope")
+            with self.assertRaises(BlockedHostError):
+                validate_url("https://nonexistent.invalid/x")
+
+    def test_rejects_non_routable_addresses(self):
+        from web_search_service.infrastructure.url_guard import (
+            BlockedHostError, validate_url,
+        )
+        for ip in ("127.0.0.1", "10.0.0.5", "192.168.1.1", "169.254.169.254",
+                   "224.0.0.1", "0.0.0.0", "::1"):
+            with patch(_DNS_PATCH_TARGET) as mock_resolve:
+                mock_resolve.return_value = [(2, 1, 6, "", (ip, 0))]
+                with self.assertRaises(BlockedHostError, msg=ip):
+                    validate_url(f"http://internal.example/{ip}")
+
+    def test_allows_public_address(self):
+        from web_search_service.infrastructure.url_guard import validate_url
+        with patch(_DNS_PATCH_TARGET) as mock_resolve:
+            mock_resolve.return_value = PUBLIC_DNS_ANSWER
+            self.assertEqual(
+                validate_url("https://example.com/form.pdf"),
+                "https://example.com/form.pdf",
+            )
+
+    def test_redirect_to_private_host_blocked(self):
+        import socket as std_socket
+        import urllib.error
+        from web_search_service.infrastructure.url_guard import build_guarded_opener
+        opener = build_guarded_opener()
+        # Drive the redirect handler directly: a 302 to a metadata endpoint.
+        handler = [h for h in opener.handlers
+                   if type(h).__name__ == "_GuardedRedirectHandler"][0]
+        with patch(_DNS_PATCH_TARGET) as mock_resolve:
+            mock_resolve.side_effect = std_socket.gaierror("nope")
+            with self.assertRaises(urllib.error.HTTPError) as ctx:
+                handler.redirect_request(MagicMock(), MagicMock(), 302, "Found", {}, "http://169.254.169.254/x")
+            self.assertEqual(ctx.exception.code, 403)
+
+
+class TestSimpleFetchGuard(unittest.TestCase):
+    """Fetch adapter: blocked URLs and oversized bodies."""
+
+    def test_blocked_url_returns_error_result(self):
+        from web_search_service.domain.models import FetchRequest
+        from web_search_service.infrastructure.fetch import SimpleFetchAdapter
+        adapter = SimpleFetchAdapter()
+        result = adapter.fetch(FetchRequest(url="http://localhost:6333/collections"))
+        self.assertIsNone(result.status_code)
+        self.assertTrue(result.content.startswith("ERROR: blocked URL"))
+
+    def test_oversized_body_is_truncated(self):
+        from web_search_service.domain.models import FetchRequest
+        import web_search_service.infrastructure.fetch as fetch_mod
+        adapter = fetch_mod.SimpleFetchAdapter()
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.headers = {"Content-Type": "text/plain"}
+        mock_resp.read.side_effect = [b"y" * 100, b""]
+        mock_opener = MagicMock()
+        mock_opener.open.return_value.__enter__ = lambda s: mock_resp
+        mock_opener.open.return_value.__exit__ = MagicMock(return_value=False)
+        with patch.object(fetch_mod, "build_guarded_opener", return_value=mock_opener), \
+             patch.object(fetch_mod, "MAX_FETCH_BYTES", 50), \
+             patch(_DNS_PATCH_TARGET) as mock_resolve:
+            mock_resolve.return_value = PUBLIC_DNS_ANSWER
+            result = adapter.fetch(FetchRequest(url="https://example.com/big"))
+        self.assertEqual(result.status_code, 200)
+        self.assertIn("[truncated:", result.content)
 
 
 if __name__ == "__main__":

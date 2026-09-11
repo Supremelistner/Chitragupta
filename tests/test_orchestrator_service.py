@@ -859,89 +859,10 @@ class TestLLMMessageBuilding(unittest.TestCase):
 # Domain Model Tests
 # =========================================================================
 
-class _FakeGenaiTypesGemini:
-    """Stub for google.genai.types used by the Gemini LLM provider under
-    test. The real SDK isn't installed in CI; the provider does lazy
-    `from google.genai import types` imports inside the methods that
-    exercise the schema conversion or the model call. The fake types just
-    store whatever kwargs they're given so the test fakes can introspect
-    them later."""
-
-    class Type:
-        STRING = "STRING"
-        NUMBER = "NUMBER"
-        INTEGER = "INTEGER"
-        BOOLEAN = "BOOLEAN"
-        ARRAY = "ARRAY"
-        OBJECT = "OBJECT"
-
-    class Schema:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-            for k, v in kwargs.items():
-                setattr(self, k, v)
-
-    class FunctionDeclaration:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-            for k, v in kwargs.items():
-                setattr(self, k, v)
-
-    class Tool:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-            for k, v in kwargs.items():
-                setattr(self, k, v)
-
-    class Part:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-            for k, v in kwargs.items():
-                setattr(self, k, v)
-
-    class Content:
-        def __init__(self, *, role, parts):
-            self.role = role
-            self.parts = parts
-
-    class FunctionCall:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-            for k, v in kwargs.items():
-                setattr(self, k, v)
-
-    class FunctionResponse:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-            for k, v in kwargs.items():
-                setattr(self, k, v)
-
-    class GenerateContentConfig:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-            for k, v in kwargs.items():
-                setattr(self, k, v)
-
-
-def _ensure_genai_stub() -> None:
-    """Inject a fake `google.genai.types` module so the orchestrator's
-    Gemini LLM provider tests run without the real google-genai package."""
-    import sys
-    import types as _types
-
-    if "google.genai" in sys.modules and hasattr(
-        sys.modules["google.genai"], "types"
-    ):
-        return
-    google_pkg = sys.modules.get("google")
-    if google_pkg is None:
-        google_pkg = _types.ModuleType("google")
-        sys.modules["google"] = google_pkg
-    genai_pkg = _types.ModuleType("google.genai")
-    genai_pkg.types = _FakeGenaiTypesGemini
-    sys.modules["google.genai"] = genai_pkg
-    google_pkg.genai = genai_pkg
-
+# Shared google.genai.types fake (see tests/_genai_stub.py). This used to be
+# a local stub incompatible with test_model_service.py's copy, which made
+# these tests fail in full-suite runs while passing solo.
+from _genai_stub import ensure_genai_stub as _ensure_genai_stub
 
 _ensure_genai_stub()
 

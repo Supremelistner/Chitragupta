@@ -276,8 +276,9 @@ class QdrantSemanticChunkStoreAdapter(SemanticChunkStore):
             payload["owner_type"] = chunk.metadata.get("owner_type")
         if chunk.metadata and "relation" in chunk.metadata:
             payload["relation"] = chunk.metadata.get("relation")
-        if chunk.metadata and "relation_name" in chunk.metadata:
-            payload["relation_name"] = chunk.metadata.get("relation_name")
+        # NOTE: relation_name (a person's name) is deliberately NOT surfaced:
+        # it stays inside the encrypted "metadata" blob. The "relation"
+        # category above is enough for "my mother's docs" filtering.
         return payload
 
     def _encrypt_if_configured(

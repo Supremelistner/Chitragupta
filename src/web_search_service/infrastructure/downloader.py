@@ -12,12 +12,22 @@ import re
 import time
 import hashlib
 from pathlib import Path
-from urllib.request import urlopen, Request
+from urllib.request import Request
 from urllib.error import HTTPError, URLError
+from web_search_service.infrastructure.url_guard import (
+    BlockedHostError,
+    build_guarded_opener,
+    validate_url,
+)
 
 from web_search_service.domain.models import (
     DownloadRequest, DownloadResult, DownloadStatus,
 )
+
+# Plain urlopen follows redirects silently; the guarded opener re-validates
+# every hop against the SSRF guard. Kept under the `urlopen` name so existing
+# call sites and test patches keep working.
+urlopen = build_guarded_opener().open
 
 logger = logging.getLogger("web_search_service.downloader")
 
@@ -75,6 +85,17 @@ class HttpDownloader:
 
     def download(self, request: DownloadRequest) -> DownloadResult:
         start = time.monotonic()
+        try:
+            validate_url(request.url)
+        except BlockedHostError as exc:
+            latency = (time.monotonic() - start) * 1000
+            return DownloadResult(
+                url=request.url,
+                status=DownloadStatus.FAILED,
+                error=f"Blocked URL: {exc}",
+                latency_ms=latency,
+                request_id=request.request_id,
+            )
         try:
             return self._do_download(request, start)
         except Exception as exc:

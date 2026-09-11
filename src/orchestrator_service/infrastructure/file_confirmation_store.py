@@ -20,8 +20,13 @@ logger = logging.getLogger("orchestrator.confirmation_store")
 class FileConfirmationStore:
     """File-based persistent confirmation store.
 
-    Structure:
-        data/confirmations/{request_id}.json
+    Structure (new writes):
+        data/confirmations/{session_id}/{request_id}.json
+
+    Sharding by session keeps the per-turn ``get_pending`` scan to one
+    small directory instead of every confirmation ever stored. Files
+    written by older versions live flat as ``{request_id}.json`` and are
+    still found via the legacy fallback in :meth:`_locate`.
 
     Each file is a single ConfirmationRequest serialized as JSON.
     Responded confirmations are marked with responded=True.
@@ -32,7 +37,7 @@ class FileConfirmationStore:
         self._base.mkdir(parents=True, exist_ok=True)
 
     def save(self, request: ConfirmationRequest) -> None:
-        path = self._path(request.request_id)
+        path = self._shard_path(request.session_id, request.request_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         data = self._serialize(request)
         path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
@@ -43,8 +48,8 @@ class FileConfirmationStore:
         )
 
     def get(self, request_id: str) -> ConfirmationRequest | None:
-        path = self._path(request_id)
-        if not path.exists():
+        path = self._locate(request_id)
+        if path is None:
             return None
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
@@ -55,7 +60,10 @@ class FileConfirmationStore:
 
     def get_pending(self, session_id: str) -> list[ConfirmationRequest]:
         pending: list[ConfirmationRequest] = []
-        for f in self._base.glob("*.json"):
+        candidates = list(self._base.glob(f"{self._safe_segment(session_id)}/*.json"))
+        # Legacy fallback: pre-sharding files stored flat.
+        candidates += [f for f in self._base.glob("*.json") if f.is_file()]
+        for f in candidates:
             try:
                 data = json.loads(f.read_text(encoding="utf-8"))
                 req = self._deserialize(data)
@@ -73,8 +81,12 @@ class FileConfirmationStore:
         req.responded = True
         req.approved = approved
         req.correction = correction
-        # Overwrite the file with updated state
-        path = self._path(request_id)
+        # Overwrite the file with updated state, wherever it lives
+        # (sharded dir for new files, flat for legacy ones).
+        path = self._locate(request_id)
+        if path is None:
+            logger.warning("Confirmation file %s vanished before respond", request_id)
+            return
         data = self._serialize(req)
         path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
         logger.info(
@@ -94,8 +106,29 @@ class FileConfirmationStore:
                 continue
         return None
 
+    @staticmethod
+    def _safe_segment(value: str) -> str:
+        """Confine a session id to a single directory level."""
+        return "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in value) or "_"
+
+    def _shard_path(self, session_id: str, request_id: str) -> Path:
+        return self._base / self._safe_segment(session_id) / f"{request_id}.json"
+
+    def _locate(self, request_id: str) -> Path | None:
+        """Find a confirmation file: sharded dirs first, flat legacy last."""
+        for shard in self._base.glob("*/"):
+            if not shard.is_dir():
+                continue
+            candidate = shard / f"{request_id}.json"
+            if candidate.is_file():
+                return candidate
+        legacy = self._base / f"{request_id}.json"
+        return legacy if legacy.is_file() else None
+
     def _path(self, request_id: str) -> Path:
-        return self._base / f"{request_id}.json"
+        """Legacy flat path. Kept for backward compatibility; prefer _locate."""
+        located = self._locate(request_id)
+        return located if located is not None else self._base / f"{request_id}.json"
 
     def _serialize(self, request: ConfirmationRequest) -> dict[str, Any]:
         return {

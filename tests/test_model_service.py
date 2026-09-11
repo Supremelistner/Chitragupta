@@ -452,54 +452,10 @@ class _FakeGeminiClient:
         self.init_kwargs = kwargs
 
 
-# A minimal stand-in for google.genai.types so the adapter can import it
-# without the real google-genai package installed. We register it on
-# sys.modules at test time.
-class _FakeGenaiTypes:
-    class GenerateContentConfig:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-
-    class SpeechConfig:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-
-    class VoiceConfig:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-
-    class PrebuiltVoiceConfig:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-
-    class Part:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-
-    class Blob:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-
-
-def _ensure_genai_stub() -> None:
-    """Inject a fake `google.genai.types` module so tests run without
-    the real google-genai package installed."""
-    import sys
-    import types as _types
-
-    if "google.genai" in sys.modules and hasattr(
-        sys.modules["google.genai"], "types"
-    ):
-        return
-    google_pkg = sys.modules.get("google")
-    if google_pkg is None:
-        google_pkg = _types.ModuleType("google")
-        sys.modules["google"] = google_pkg
-    genai_pkg = _types.ModuleType("google.genai")
-    genai_pkg.types = _FakeGenaiTypes
-    sys.modules["google.genai"] = genai_pkg
-    google_pkg.genai = genai_pkg
-
+# Shared google.genai.types fake (see tests/_genai_stub.py). This used to be
+# a local stub incompatible with test_orchestrator_service.py's copy, which
+# made one file's Gemini tests fail in full-suite runs while passing solo.
+from _genai_stub import ensure_genai_stub as _ensure_genai_stub
 
 _ensure_genai_stub()
 

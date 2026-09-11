@@ -80,9 +80,9 @@ class FallbackProvider(ModelProvider):
         return result
 
     def list_models(self) -> list[ModelInfo]:
-        models = self._primary.list_models()
-        models.extend(self._fallback.list_models())
-        return models
+        # Copy: extending the primary's own list object would mutate the
+        # provider's internal state for every caller holding that reference.
+        return [*self._primary.list_models(), *self._fallback.list_models()]
 
     def health(self) -> ProviderHealth:
         primary_health = self._primary.health()

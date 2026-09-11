@@ -107,6 +107,13 @@ def _build_semantic_search(config: AppConfig) -> tuple[SemanticSearchService, De
             "Run `python activate.py --bg` to start the infrastructure, "
             "or set the env var to your own Qdrant URL."
         )
+    if not config.encryption_master_key and config.environment.lower() not in {"development", "dev", "test"}:
+        raise SystemExit(
+            "ENCRYPTION_MASTER_KEY is not set. Without it every Qdrant "
+            "payload is stored in plaintext, silently voiding the PII "
+            "guarantee. Set the key, or run with DOCUMENT_SERVICE_ENV=development "
+            "to acknowledge plaintext mode explicitly."
+        )
     store = QdrantSemanticChunkStoreAdapter(
         base_url=config.qdrant_url,
         collection_name=config.qdrant_collection_name,

@@ -6,6 +6,7 @@ from hashlib import sha256
 import logging
 from pathlib import Path
 import tempfile
+import threading
 from typing import Any, Callable
 from uuid import uuid4
 
@@ -29,6 +30,23 @@ from document_mgmt_service.domain.models import (
 )
 from document_mgmt_service.domain.ports import FileStorage, OCRService, PostgreSQLDocumentRepository
 from document_mgmt_service.infrastructure.image_utils import resize_image
+
+_doc_locks_guard = threading.Lock()
+_doc_locks: dict[str, threading.Lock] = {}
+
+
+def _lock_for_document(document_id: str) -> threading.Lock:
+    """Return the process-local lock serializing one document's ingestions.
+
+    Entries are never evicted; for a single-user vault the registry stays
+    tiny (one small lock object per document ever ingested in-process).
+    """
+    with _doc_locks_guard:
+        lock = _doc_locks.get(document_id)
+        if lock is None:
+            lock = threading.Lock()
+            _doc_locks[document_id] = lock
+        return lock
 
 
 class ModelProviderProtocol:
@@ -193,7 +211,21 @@ class IngestionService:
         semantic_search = self._dependencies.semantic_search
 
         document_id = request.document_id or self._uuid_factory()
-        version = repository.next_version(document_id)
+        # Serialize same-document ingestions: version allocation
+        # (SELECT MAX+1) and the pipeline's repeated upserts run as
+        # separate statements, so two concurrent uploads of one
+        # document_id could mint the same version and interleave rows
+        # (the upsert is ON CONFLICT DO UPDATE, so this corrupts
+        # silently instead of erroring). The document service runs as a
+        # single process, so a process-local per-document lock is
+        # sufficient — no DB round-trip, works with any repository.
+        doc_lock = _lock_for_document(document_id)
+        doc_lock.acquire()
+        try:
+            version = repository.next_version(document_id)
+        except Exception:
+            doc_lock.release()
+            raise
         now = self._clock()
         file_kind = infer_file_kind(request.original_filename, request.content_type)
         checksum = sha256(request.content).hexdigest()
@@ -442,6 +474,7 @@ class IngestionService:
             finally:
                 raise
         finally:
+            doc_lock.release()
             if temp_path is not None and temp_path.exists():
                 temp_path.unlink(missing_ok=True)
 
@@ -595,26 +628,38 @@ class IngestionService:
 
         Returns an empty dict if everything fails. Never raises — the ingestion
         pipeline must keep going even if the model service is misbehaving.
-        """
-        classification: dict[str, Any] = {}
-        try:
-            classification = model_provider.classify_document(
-                image_bytes=image_bytes, mime_type=mime_type,
-            )
-        except Exception as exc:
-            logger.warning("Classification failed for %s: %s", document_id, exc)
-            classification = {}
 
-        metadata_extraction: dict[str, Any] = {}
-        try:
-            metadata_extraction = model_provider.extract_metadata(
-                image_bytes=image_bytes, mime_type=mime_type,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Metadata extraction failed for %s: %s", document_id, exc,
-            )
-            metadata_extraction = {}
+        The two structured calls are independent (same image, different
+        prompts), so they run concurrently: model inference dominates
+        ingest latency and these calls each take seconds.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
+        def _classify() -> dict[str, Any]:
+            try:
+                return model_provider.classify_document(
+                    image_bytes=image_bytes, mime_type=mime_type,
+                )
+            except Exception as exc:
+                logger.warning("Classification failed for %s: %s", document_id, exc)
+                return {}
+
+        def _extract() -> dict[str, Any]:
+            try:
+                return model_provider.extract_metadata(
+                    image_bytes=image_bytes, mime_type=mime_type,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Metadata extraction failed for %s: %s", document_id, exc,
+                )
+                return {}
+
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="model-pipe") as pool:
+            future_classify = pool.submit(_classify)
+            future_extract = pool.submit(_extract)
+            classification = future_classify.result()
+            metadata_extraction = future_extract.result()
 
         merged = _merge_classification(classification, metadata_extraction)
         if "document_type" in merged and "document_sub_type" in merged:

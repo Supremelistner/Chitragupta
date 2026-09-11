@@ -91,6 +91,168 @@ def create_app(
     async def healthz():
         return {"status": "ok", "service": "orchestrator-service"}
 
+    # ─── Auth (V1 multi-user: email+password + JWT 7d sliding) ────
+    def _jwt_secret() -> str:
+        import os as _os
+        secret = _os.environ.get("CHITRAGUPTA_JWT_SECRET", "")
+        if not secret:
+            logger.warning("CHITRAGUPTA_JWT_SECRET unset — using dev fallback (set it in .env)")
+            return "chitragupta-dev-secret-change-me"
+        return secret
+
+    def _auth_store():
+        from orchestrator_service.infrastructure.auth_store import FileAuthStore
+        import os as _os
+        base = _os.environ.get("CHITRAGUPTA_AUTH_DIR", "./data/users")
+        return FileAuthStore(base)
+
+    def _current_user(request: Request) -> dict:
+        from shared.auth import bearer_user
+        try:
+            return bearer_user(request.headers.get("authorization"), secret=_jwt_secret())
+        except Exception as exc:
+            raise HTTPException(status_code=401, detail=str(exc))
+
+    @app.post("/api/auth/register")
+    async def auth_register(request: Request):
+        from shared.auth import issue_token
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="email and password are required")
+        try:
+            user = _auth_store().register(body.get("email", ""), body.get("password", ""))
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        token = issue_token(user_id=user["user_id"], email=user["email"], secret=_jwt_secret())
+        return {"user_id": user["user_id"], "email": user["email"], "token": token, "expires_days": 7}
+
+    @app.post("/api/auth/login")
+    async def auth_login(request: Request):
+        from shared.auth import issue_token
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(status_code=401, detail="invalid credentials")
+        try:
+            user = _auth_store().authenticate(body.get("email", ""), body.get("password", ""))
+        except Exception:
+            raise HTTPException(status_code=401, detail="invalid credentials")
+        token = issue_token(user_id=user["user_id"], email=user["email"], secret=_jwt_secret())
+        return {"user_id": user["user_id"], "email": user["email"], "token": token, "expires_days": 7}
+
+    @app.post("/api/auth/refresh")
+    async def auth_refresh(request: Request):
+        from shared.auth import issue_token, verify_token
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        token = (body.get("token") if isinstance(body, dict) else None) or (
+            request.headers.get("authorization", "").replace("Bearer ", "")
+        )
+        try:
+            payload = verify_token(token, secret=_jwt_secret())
+        except Exception as exc:
+            raise HTTPException(status_code=401, detail=str(exc))
+        fresh = issue_token(user_id=payload["sub"], email=payload.get("email", ""), secret=_jwt_secret())
+        return {"token": fresh, "expires_days": 7, "user_id": payload["sub"]}
+
+    @app.get("/api/me")
+    async def auth_me(request: Request):
+        payload = _current_user(request)
+        return {"user_id": payload["sub"], "email": payload.get("email", "")}
+
+    @app.post("/api/auth/logout")
+    async def auth_logout(request: Request):
+        """Wipe prev-user local device data on user-switch (docs only, no sessions).
+
+        Body: {"user_id": "...", "wipe": true}. Purges that user's local
+        file blobs staged under data/files for the device; the global hub
+        copy is untouched so the next login pulls from scratch.
+        """
+        payload = _current_user(request)
+        body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+        if not body.get("wipe"):
+            return {"logged_out": True, "user_id": payload["sub"]}
+        import shutil
+        from pathlib import Path as _Path
+        wiped = 0
+        files_root = _Path("./data/files/documents")
+        if files_root.exists():
+            for child in files_root.iterdir():
+                # Storage keys embed document_id, not user_id; full purge of
+                # the device cache is the V1 wipe (single active user).
+                try:
+                    if child.is_dir():
+                        shutil.rmtree(child, ignore_errors=True)
+                    else:
+                        child.unlink(missing_ok=True)
+                    wiped += 1
+                except Exception:
+                    pass
+        return {"logged_out": True, "user_id": payload["sub"], "wiped_entries": wiped}
+
+    # ─── Device sync (V1: docs-only push/pull against global hub) ─
+    @app.get("/api/sync/manifest")
+    async def sync_manifest(request: Request):
+        payload = _current_user(request)
+        from shared.device_sync import pull_manifest
+        return pull_manifest(payload["sub"])
+
+    @app.post("/api/sync/pull")
+    async def sync_pull(request: Request):
+        """Pull = list global manifest for re-download (client re-ingests).
+
+        V1 restores by re-uploading blobs through the normal ingest path
+        (new versions acceptable); version-preserving restore lands with
+        the production global-Postgres phase.
+        """
+        payload = _current_user(request)
+        from shared.device_sync import pull_manifest
+        manifest = pull_manifest(payload["sub"])
+        docs = manifest.get("documents", {})
+        return {"user_id": payload["sub"], "count": len(docs), "documents": docs}
+
+    @app.post("/api/sync/restore")
+    async def sync_restore(request: Request):
+        """V2-4 version-preserving pull: replay global hub blobs into the
+        doc service via POST /documents/restore (same IDs + versions)."""
+        import base64 as _b64
+        import requests as _req
+        payload = _current_user(request)
+        user_id = payload["sub"]
+        from shared.device_sync import pull_manifest, read_blob
+        manifest = pull_manifest(user_id)
+        docs = manifest.get("documents", {})
+        restored, errors = [], []
+        headers = {"X-User-Id": user_id}
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        only = body.get("document_id")
+        for doc_id, entry in docs.items():
+            if only and doc_id != only:
+                continue
+            try:
+                blob = read_blob(user_id=user_id, blob_name=entry["blob"])
+                resp = _req.post(
+                    f"{doc_service_url}/documents/restore",
+                    json={"document_id": doc_id, "version": int(entry.get("version", 1)),
+                          "user_id": user_id,
+                          "filename": (entry.get("metadata") or {}).get("filename", doc_id),
+                          "content_base64": _b64.b64encode(blob).decode()},
+                    headers=headers, timeout=120,
+                )
+                if resp.status_code >= 400:
+                    errors.append({"document_id": doc_id, "error": resp.text[:100]})
+                else:
+                    restored.append({"document_id": doc_id, **resp.json()})
+            except Exception as exc:
+                errors.append({"document_id": doc_id, "error": str(exc)[:100]})
+        return {"user_id": user_id, "restored": restored, "errors": errors}
+
     # ─── Sessions ──────────────────────────────────────────────────
     @app.get("/api/sessions")
     async def list_sessions():
@@ -394,6 +556,7 @@ def create_app(
         document_id: str = "",
         privacy: str = "",
         description: str = "",
+        user_id: str = "",
     ) -> dict:
         """Forward raw file bytes to the document service for ingestion.
 
@@ -411,12 +574,17 @@ def create_app(
             data["privacy"] = privacy
         if description:
             data["description"] = description
+        headers: dict[str, str] = {}
+        if user_id:
+            data["user_id"] = user_id
+            headers["X-User-Id"] = user_id
 
         try:
             resp = req_lib.post(
                 f"{doc_service_url}/documents",
                 files=files,
                 data=data,
+                headers=headers or None,
                 timeout=120,
             )
         except req_lib.exceptions.ConnectionError as exc:
@@ -482,6 +650,7 @@ def create_app(
     # ─── File Upload ───────────────────────────────────────────────
     @app.post("/api/upload")
     async def upload_file(
+        request: Request,
         file: UploadFile = File(...),
         session_id: str = Form(default=""),
         privacy: str = Form(default=""),
@@ -523,6 +692,14 @@ def create_app(
         if not file_bytes:
             raise HTTPException(status_code=400, detail="Uploaded file is empty")
 
+        # Optional auth: Bearer → user_id, else legacy __local__ (keeps
+        # existing UI/tests working pre-login).
+        upload_user_id = "__local__"
+        try:
+            upload_user_id = _current_user(request)["sub"]
+        except HTTPException:
+            pass
+
         # Forward to document service (shared helper; raises on failure)
         try:
             result = _forward_to_document_service(
@@ -532,7 +709,31 @@ def create_app(
                 document_id=session_id,
                 privacy=privacy,
                 description=description,
+                user_id=upload_user_id,
             )
+            # Event-driven sync: push raw bytes to the global hub so a new
+            # device can pull. Best-effort — ingest already succeeded.
+            try:
+                from shared.device_sync import push_document
+                if "documents" in result:
+                    for d in result["documents"]:
+                        push_document(
+                            user_id=upload_user_id,
+                            document_id=d.get("document_id", ""),
+                            version=int(d.get("version", 1)),
+                            blob=file_bytes,
+                            metadata={"filename": file.filename},
+                        )
+                elif result.get("document_id"):
+                    push_document(
+                        user_id=upload_user_id,
+                        document_id=result["document_id"],
+                        version=int(result.get("version", 1)),
+                        blob=file_bytes,
+                        metadata={"filename": file.filename},
+                    )
+            except Exception:
+                logger.exception("Global sync push failed (ingest kept)")
 
             # Upload responses are intentionally terse; generated descriptions
             # stay available through metadata/description endpoints.

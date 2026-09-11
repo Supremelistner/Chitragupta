@@ -106,12 +106,13 @@ class PostgreSQLRepositoryAdapter(PostgreSQLDocumentRepository):
                 return int(row[0]) if row else 1
 
     def upsert_version(self, record: DocumentVersionRecord) -> None:
+        user_id = getattr(record, "user_id", "__local__") or "__local__"
         with self._connection_factory() as conn:
             with conn.cursor() as cursor:
                 cursor.execute(
                     """
-                    INSERT INTO documents (document_id, latest_version, created_at, updated_at)
-                    VALUES (%s, %s, COALESCE(%s, NOW()), COALESCE(%s, NOW()))
+                    INSERT INTO documents (document_id, user_id, latest_version, created_at, updated_at)
+                    VALUES (%s, %s, %s, COALESCE(%s, NOW()), COALESCE(%s, NOW()))
                     ON CONFLICT (document_id)
                     DO UPDATE SET
                         latest_version = GREATEST(documents.latest_version, EXCLUDED.latest_version),
@@ -119,6 +120,7 @@ class PostgreSQLRepositoryAdapter(PostgreSQLDocumentRepository):
                     """,
                     (
                         record.document_id,
+                        user_id,
                         record.version,
                         record.created_at,
                         record.updated_at,
@@ -127,7 +129,7 @@ class PostgreSQLRepositoryAdapter(PostgreSQLDocumentRepository):
                 cursor.execute(
                     """
                     INSERT INTO document_versions (
-                        document_id, version, original_filename, content_type, file_kind,
+                        document_id, version, user_id, original_filename, content_type, file_kind,
                         storage_key, file_size_bytes, sha256, privacy, processing_status,
                         metadata, description, extracted_text, extracted_text_excerpt,
                         semantic_index_status, semantic_indexed_at, chunk_count,
@@ -138,7 +140,7 @@ class PostgreSQLRepositoryAdapter(PostgreSQLDocumentRepository):
                         summary, extracted_fields, owner_type, relation, relation_name, expiry_date
                     )
                     VALUES (
-                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                         %s::jsonb, %s, %s, %s, %s, %s, %s,
                         COALESCE(%s, NOW()), COALESCE(%s, NOW()), %s, %s,
                         %s::jsonb, %s, %s, %s, %s, %s, %s, %s::jsonb,
@@ -146,6 +148,7 @@ class PostgreSQLRepositoryAdapter(PostgreSQLDocumentRepository):
                     )
                     ON CONFLICT (document_id, version)
                     DO UPDATE SET
+                        user_id = EXCLUDED.user_id,
                         original_filename = EXCLUDED.original_filename,
                         content_type = EXCLUDED.content_type,
                         file_kind = EXCLUDED.file_kind,
@@ -182,6 +185,7 @@ class PostgreSQLRepositoryAdapter(PostgreSQLDocumentRepository):
                     (
                         record.document_id,
                         record.version,
+                        user_id,
                         record.original_filename,
                         record.content_type,
                         record.file_kind.value,
@@ -219,11 +223,12 @@ class PostgreSQLRepositoryAdapter(PostgreSQLDocumentRepository):
                 )
             conn.commit()
 
-    def get_version(self, document_id: str, version: int) -> DocumentVersionRecord | None:
+    def get_version(self, document_id: str, version: int, user_id: str | None = None) -> DocumentVersionRecord | None:
         with self._connection_factory() as conn:
             with conn.cursor() as cursor:
-                cursor.execute(
-                    """
+                if user_id:
+                    cursor.execute(
+                        """
                     SELECT document_id, version, original_filename, content_type, file_kind,
                            storage_key, file_size_bytes, sha256, privacy, processing_status,
                            metadata, description, extracted_text, extracted_text_excerpt,
@@ -232,22 +237,42 @@ class PostgreSQLRepositoryAdapter(PostgreSQLDocumentRepository):
                            model_extraction, description_safe, description_detailed,
                            extraction_confidence, document_type, document_sub_type,
                            language_primary, pii_types,
-                           summary, extracted_fields, owner_type, relation, relation_name, expiry_date
+                           summary, extracted_fields, owner_type, relation, relation_name, expiry_date,
+                           user_id
+                    FROM document_versions
+                    WHERE document_id = %s AND version = %s AND user_id = %s
+                    """,
+                        (document_id, version, user_id),
+                    )
+                else:
+                    cursor.execute(
+                        """
+                    SELECT document_id, version, original_filename, content_type, file_kind,
+                           storage_key, file_size_bytes, sha256, privacy, processing_status,
+                           metadata, description, extracted_text, extracted_text_excerpt,
+                           semantic_index_status, semantic_indexed_at, chunk_count,
+                           created_at, updated_at, completed_at, error_message,
+                           model_extraction, description_safe, description_detailed,
+                           extraction_confidence, document_type, document_sub_type,
+                           language_primary, pii_types,
+                           summary, extracted_fields, owner_type, relation, relation_name, expiry_date,
+                           user_id
                     FROM document_versions
                     WHERE document_id = %s AND version = %s
                     """,
-                    (document_id, version),
-                )
+                        (document_id, version),
+                    )
                 row = cursor.fetchone()
         if row is None:
             return None
         return self._row_to_record(row)
 
-    def list_versions(self, document_id: str) -> list[DocumentVersionRecord]:
+    def list_versions(self, document_id: str, user_id: str | None = None) -> list[DocumentVersionRecord]:
         with self._connection_factory() as conn:
             with conn.cursor() as cursor:
-                cursor.execute(
-                    """
+                if user_id:
+                    cursor.execute(
+                        """
                     SELECT document_id, version, original_filename, content_type, file_kind,
                            storage_key, file_size_bytes, sha256, privacy, processing_status,
                            metadata, description, extracted_text, extracted_text_excerpt,
@@ -256,32 +281,69 @@ class PostgreSQLRepositoryAdapter(PostgreSQLDocumentRepository):
                            model_extraction, description_safe, description_detailed,
                            extraction_confidence, document_type, document_sub_type,
                            language_primary, pii_types,
-                           summary, extracted_fields, owner_type, relation, relation_name, expiry_date
+                           summary, extracted_fields, owner_type, relation, relation_name, expiry_date,
+                           user_id
+                    FROM document_versions
+                    WHERE document_id = %s AND user_id = %s
+                    ORDER BY version ASC
+                    """,
+                        (document_id, user_id),
+                    )
+                else:
+                    cursor.execute(
+                        """
+                    SELECT document_id, version, original_filename, content_type, file_kind,
+                           storage_key, file_size_bytes, sha256, privacy, processing_status,
+                           metadata, description, extracted_text, extracted_text_excerpt,
+                           semantic_index_status, semantic_indexed_at, chunk_count,
+                           created_at, updated_at, completed_at, error_message,
+                           model_extraction, description_safe, description_detailed,
+                           extraction_confidence, document_type, document_sub_type,
+                           language_primary, pii_types,
+                           summary, extracted_fields, owner_type, relation, relation_name, expiry_date,
+                           user_id
                     FROM document_versions
                     WHERE document_id = %s
                     ORDER BY version ASC
                     """,
-                    (document_id,),
-                )
+                        (document_id,),
+                    )
                 rows = cursor.fetchall()
         return [self._row_to_record(row) for row in rows]
 
-    def list_documents(self) -> list[DocumentSummaryRecord]:
+    def list_documents(self, user_id: str | None = None) -> list[DocumentSummaryRecord]:
         with self._connection_factory() as conn:
             with conn.cursor() as cursor:
-                cursor.execute(
-                    """
+                if user_id:
+                    cursor.execute(
+                        """
                     SELECT d.document_id, d.latest_version, v.processing_status, v.privacy,
                            v.metadata, v.description, v.summary, v.owner_type, v.relation, v.relation_name, v.expiry_date,
                            v.extracted_fields, v.semantic_index_status, v.chunk_count,
-                           d.created_at, d.updated_at
+                           d.created_at, d.updated_at, v.user_id
+                    FROM documents d
+                    JOIN document_versions v
+                      ON v.document_id = d.document_id
+                     AND v.version = d.latest_version
+                    WHERE d.user_id = %s
+                    ORDER BY d.updated_at DESC, d.document_id ASC
+                    """,
+                        (user_id,),
+                    )
+                else:
+                    cursor.execute(
+                        """
+                    SELECT d.document_id, d.latest_version, v.processing_status, v.privacy,
+                           v.metadata, v.description, v.summary, v.owner_type, v.relation, v.relation_name, v.expiry_date,
+                           v.extracted_fields, v.semantic_index_status, v.chunk_count,
+                           d.created_at, d.updated_at, v.user_id
                     FROM documents d
                     JOIN document_versions v
                       ON v.document_id = d.document_id
                      AND v.version = d.latest_version
                     ORDER BY d.updated_at DESC, d.document_id ASC
-                    """
-                )
+                    """,
+                    )
                 rows = cursor.fetchall()
         return [self._row_to_summary(row) for row in rows]
 
@@ -325,6 +387,7 @@ class PostgreSQLRepositoryAdapter(PostgreSQLDocumentRepository):
             relation=row[32],
             relation_name=row[33],
             expiry_date=row[34],
+            user_id=(row[35] if len(row) > 35 and row[35] else "__local__"),
         )
 
     def _row_to_summary(self, row: Any) -> DocumentSummaryRecord:
@@ -334,7 +397,7 @@ class PostgreSQLRepositoryAdapter(PostgreSQLDocumentRepository):
         #  6 summary          7 owner_type            8 relation
         #  9 relation_name    10 expiry_date          11 extracted_fields
         #  12 semantic_index_status   13 chunk_count  14 created_at
-        #  15 updated_at
+        #  15 updated_at   16 user_id
         return DocumentSummaryRecord(
             document_id=row[0],
             latest_version=int(row[1]),
@@ -352,4 +415,5 @@ class PostgreSQLRepositoryAdapter(PostgreSQLDocumentRepository):
             chunk_count=int(row[13] or 0),
             created_at=row[14],
             updated_at=row[15],
+            user_id=(row[16] if len(row) > 16 and row[16] else "__local__"),
         )

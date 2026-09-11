@@ -244,6 +244,7 @@ class IngestionService:
             initial_record = DocumentVersionRecord(
                 document_id=document_id,
                 version=version,
+                user_id=getattr(request, "user_id", "__local__") or "__local__",
                 original_filename=request.original_filename,
                 content_type=request.content_type,
                 file_kind=file_kind,
@@ -467,6 +468,7 @@ class IngestionService:
             failed_record = DocumentVersionRecord(
                 document_id=document_id,
                 version=version,
+                user_id=getattr(request, "user_id", "__local__") or "__local__",
                 original_filename=request.original_filename,
                 content_type=request.content_type,
                 file_kind=file_kind,
@@ -627,6 +629,7 @@ class IngestionService:
             relation=relation if relation is not None else record.relation,
             relation_name=relation_name if relation_name is not None else record.relation_name,
             expiry_date=expiry_date if expiry_date is not None else record.expiry_date,
+            user_id=getattr(record, "user_id", "__local__") or "__local__",
         )
 
     def _run_model_pipeline(

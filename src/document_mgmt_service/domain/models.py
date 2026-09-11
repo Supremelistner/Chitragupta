@@ -80,6 +80,9 @@ class DocumentVersionRecord:
     extracted_fields: dict[str, Any] | None = None
     # V2: extracted expiry date if visible on the document
     expiry_date: datetime | None = None
+    # V1 multi-user: tenant owner. Default keeps all existing
+    # constructors/tests working; backfilled as '__local__'.
+    user_id: str = "__local__"
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +94,7 @@ class DocumentIngestionRequest:
     privacy_hint: DocumentPrivacyClassification | None = None
     description_hint: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    user_id: str = "__local__"
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,6 +145,7 @@ class DocumentSummaryRecord:
     chunk_count: int = 0
     created_at: datetime | None = None
     updated_at: datetime | None = None
+    user_id: str = "__local__"
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,6 +164,7 @@ class SemanticChunkRecord:
     original_filename: str | None = None
     content_type: str | None = None
     created_at: datetime | None = None
+    user_id: str = "__local__"
 
 
 @dataclass(frozen=True, slots=True)

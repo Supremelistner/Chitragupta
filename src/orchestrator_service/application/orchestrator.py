@@ -823,10 +823,13 @@ class OrchestrationEngine:
             else:
                 target = self._registry.get_service(tool_call.tool_name)
                 if target:
+                    scoped = self._scoped_args(session, target, tool_call.arguments)
                     result = self._router.call_tool(
-                        target, tool_call.tool_name,
-                        self._scoped_args(session, target, tool_call.arguments),
+                        target, tool_call.tool_name, scoped,
                     )
+                    # Approval-cache path already implies consent: complete
+                    # a token-carrying step-1 inline (see confirmed step).
+                    result = self._maybe_complete_field_value(target, tool_call.tool_name, scoped, result)
                 else:
                     result = {"error": True, "message": f"Unknown tool: {tool_call.tool_name}"}
 
@@ -920,10 +923,15 @@ class OrchestrationEngine:
         target = self._registry.get_service(tool_call.tool_name)
 
         if target:
+            scoped = self._scoped_args(session, target, tool_call.arguments)
             result = self._router.call_tool(
-                target, tool_call.tool_name,
-                self._scoped_args(session, target, tool_call.arguments),
+                target, tool_call.tool_name, scoped,
             )
+            # Post-approval auto step-2: a requires_confirmation answer that
+            # already carries the server token is completed immediately with
+            # the token attached, so the value arrives without depending on
+            # the LLM to parrot the token back on a retry turn.
+            result = self._maybe_complete_field_value(target, tool_call.tool_name, scoped, result)
             tool_call.result = result
             tool_call.status = (
                 ToolCallStatus.FAILED if result.get("error") else ToolCallStatus.SUCCESS
@@ -1019,6 +1027,34 @@ class OrchestrationEngine:
         if not user_id:
             return args
         return {**args, "user_id": user_id}
+
+    def _maybe_complete_field_value(
+        self, target: Any, tool_name: str, args: dict[str, Any], result: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Auto-complete get_field_value step 2 after approval.
+
+        Only fires on post-consent paths (confirmed step, fresh approval
+        cache). Re-issues the call with the server's confirmation_token so
+        the value — not another requires_confirmation — reaches the LLM.
+        Never raises: on any failure the original step-1 result stands.
+        """
+        try:
+            if tool_name != "get_field_value" or not isinstance(result, dict):
+                return result
+            if result.get("status") != "requires_confirmation":
+                return result
+            token = result.get("confirmation_token")
+            if not token:
+                return result
+            retry = self._router.call_tool(
+                target, tool_name, {**args, "confirmation_token": token}
+            )
+            if isinstance(retry, dict) and not retry.get("error"):
+                return retry
+            return result
+        except Exception:
+            logger.warning("Field step-2 auto-complete failed; keeping step-1 result")
+            return result
 
     def _confirmation_message(
         self,

@@ -223,9 +223,11 @@ def build_system_prompt(*, user_name=None):
     TWO-STEP FIELD VALUE  (policy §5, failures #1)
     ====================================================================
     get_field_value(doc, ver, field) is a two-step protocol:
-      First call  → status="requires_confirmation", value=null. Popup shown.
+      First call  → status="requires_confirmation", value=null,
+                plus a confirmation_token. Popup shown.
                 Acknowledge briefly and STOP.
-      Second call (confirm=true) → status="ok", value=... → show the value +
+      Second call (same args + confirmation_token from step 1)
+                → status="ok", value=... → show the value +
        the standard footer: "Source: <filename> (<relation>). Press 'Retrieve
        original file' to view the full document."
 

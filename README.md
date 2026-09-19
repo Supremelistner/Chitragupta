@@ -74,8 +74,15 @@ at the vector layer.
 
 ## Quick start
 
+**Prerequisite: Docker must be running.** Postgres + Qdrant run in Docker
+and there is no in-memory/SQLite fallback. On **Windows/WSL**, `activate.py`
+auto-starts Docker Desktop and waits for the daemon if it is down. On
+**Linux/macOS**, start the daemon yourself first (`sudo systemctl start
+docker` / `open -a Docker`).
+
 ```bash
-# 1. Start Postgres + Qdrant
+# 1. Start Postgres + Qdrant (skipped automatically if already running;
+#    activate.py --bg also does this for you)
 docker compose up -d
 
 # 2. Copy and edit .env (see .env.example for the full set of variables)
@@ -191,6 +198,13 @@ use OpenAI-style APIs and are unaffected.
 - Field values never enter Qdrant — only field *names* (as `field_pointers`).
 - `text`, `description`, and `metadata` are Fernet-encrypted at rest in
   Qdrant with a per-document key.
+- **Postgres storage boundary:** the structured `extracted_fields` column
+  (the full PII values) is stored as **plaintext JSONB** and GIN-indexed so
+  it stays queryable — it is **not** encrypted at rest in the database.
+  Confidentiality for these values rests on database access control (the
+  DB runs in local Docker, not exposed publicly), the two-step reveal gate
+  (`confirm: true` required), and audit logging — not on column encryption.
+  Encrypting this column at rest is tracked as future work (audit CG-003).
 - Document access for `SENSITIVE` documents requires an explicit
   `request_sensitive_access` approval.
 - All sensitive-access attempts are recorded in `audit_events`.

@@ -501,7 +501,14 @@ def create_app(
         correction = body.get("correction")
         if not session_id or not request_id:
             raise HTTPException(status_code=400, detail="session_id and request_id required")
-        response = engine.handle_confirmation(session_id, request_id, approved, correction=correction)
+        try:
+            confirm_user_id = _current_user(request)["sub"]
+        except HTTPException:
+            confirm_user_id = None
+        response = engine.handle_confirmation(
+            session_id, request_id, approved, correction=correction,
+            user_id=confirm_user_id,
+        )
         return {
             "session_id": response.session_id,
             "message": response.message,

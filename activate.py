@@ -265,6 +265,97 @@ def ensure_dirs() -> None:
     PID_FILE.parent.mkdir(parents=True, exist_ok=True)
 
 
+def _docker_daemon_ready() -> bool:
+    """Return True if a Docker daemon is reachable (``docker version`` ok)."""
+    for cmd in (["docker", "version", "--format", "{{.Server.Version}}"],):
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        except FileNotFoundError:
+            return False
+        except Exception:
+            return False
+        if r.returncode == 0 and r.stdout.strip():
+            return True
+    return False
+
+
+def _windows_docker_desktop_path() -> str | None:
+    """Best-effort path to Docker Desktop.exe on Windows / WSL-interop."""
+    candidates = [
+        r"C:\Program Files\Docker\Docker\Docker Desktop.exe",
+        r"C:\Program Files\Docker\Docker\frontend\Docker Desktop.exe",
+    ]
+    # On WSL, the Windows drive is mounted under /mnt/c.
+    wsl_candidates = [
+        "/mnt/c/Program Files/Docker/Docker/Docker Desktop.exe",
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    if IS_WSL:
+        for path in wsl_candidates:
+            if os.path.exists(path):
+                return path
+    return None
+
+
+def _ensure_docker_daemon(timeout: float = 90.0) -> bool:
+    """Ensure a Docker daemon is running before we try compose.
+
+    Fast path: if ``docker version`` already succeeds, return immediately.
+
+    Auto-start: on Windows (and WSL-interop, which drives the same Docker
+    Desktop), launch Docker Desktop and poll ``docker version`` until the
+    daemon answers or ``timeout`` elapses. On Linux/macOS we do not try to
+    start the daemon (systemd/launchd + permissions vary too much); we just
+    report it is down so the caller's error message can guide the user.
+
+    Returns True if the daemon is ready, False otherwise. Never raises.
+    """
+    if _docker_daemon_ready():
+        return True
+
+    if not (IS_WINDOWS or IS_WSL):
+        # Linux/macOS: documented fallback — tell the user to start it.
+        print(
+            f"  {DIM}Docker daemon not reachable. Start it and re-run:\n"
+            f"           • Linux:  sudo systemctl start docker\n"
+            f"           • macOS:  open -a Docker{RESET}"
+        )
+        return False
+
+    exe = _windows_docker_desktop_path()
+    if not exe:
+        print(f"  {DIM}Docker daemon down and Docker Desktop.exe not found — start Docker manually.{RESET}")
+        return False
+
+    print(f"  \033[33m⟳{RESET} Docker daemon not running — launching Docker Desktop...")
+    try:
+        if IS_WSL:
+            # From WSL, launch the Windows binary; detach so it keeps running.
+            subprocess.Popen(
+                [exe], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        else:
+            subprocess.Popen(
+                [exe], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                **_popen_kwargs(),
+            )
+    except Exception as e:
+        print(f"  {DIM}Failed to launch Docker Desktop: {e}{RESET}")
+        return False
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if _docker_daemon_ready():
+            print(f"  \033[32m✓{RESET} Docker daemon ready")
+            return True
+        time.sleep(3)
+
+    print(f"  {DIM}Docker Desktop launched but the daemon did not become ready within {int(timeout)}s.{RESET}")
+    return False
+
+
 def _docker_compose_up() -> bool:
     """Bring up the docker compose stack using whatever compose binary is
     available. Tries (in order): docker compose v2, docker-compose v1, then
@@ -362,6 +453,10 @@ def start_docker() -> None:
         f"  \033[33m⟳{RESET} Docker: PostgreSQL {'up' if pg_ok else 'down'} :5432, "
         f"Qdrant {'up' if qd_ok else 'down'} :6333 — starting compose stack..."
     )
+    # Make sure the Docker daemon itself is up before invoking compose. On
+    # Windows/WSL this auto-launches Docker Desktop and waits; elsewhere it
+    # prints a start hint. Compose can't succeed if the daemon is down.
+    _ensure_docker_daemon()
     if not _docker_compose_up():
         sys.exit(
             "\n  \033[31m✗ Docker compose failed to start the stack.\n"

@@ -45,7 +45,11 @@ retrieval and provenance.
 
 **Does NOT own:** Canonical document state, authorization decisions, file binaries.
 
-**Payload schema:** Defined in `src/document_mgmt_service/schemas/qdrant_payload.py`.
+**Payload schema:** The canonical payload contract is
+`QdrantSemanticChunkStoreAdapter._build_payload` in
+`src/document_mgmt_service/infrastructure/qdrant.py`; collection config +
+plaintext-filterable fields are documented in `QDRANT_COLLECTION_CONFIG`
+in the same module.
 
 **Point ID strategy:** Uses `chunk_id` (deterministic string derived from
 `document_id:version:chunk_index`). This enables bidirectional tracing:

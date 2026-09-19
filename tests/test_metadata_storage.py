@@ -33,15 +33,14 @@ from document_mgmt_service.domain.models import (
     DocumentProcessingStatus,
     SemanticIndexStatus,
 )
-from document_mgmt_service.infrastructure.qdrant import QdrantSemanticChunkStoreAdapter
+from document_mgmt_service.infrastructure.qdrant import (
+    QdrantSemanticChunkStoreAdapter,
+    QDRANT_COLLECTION_CONFIG,
+)
 from document_mgmt_service.infrastructure.storage import LocalFileStorageAdapter
 from document_mgmt_service.schemas import MIGRATIONS, Migration, apply_migrations
 
 from tests._live_stack import build_postgres_repo, build_qdrant_store
-from document_mgmt_service.schemas.qdrant_payload import (
-    QDRANT_COLLECTION_CONFIG,
-    QdrantChunkPayload,
-)
 
 
 # ---------------------------------------------------------------------------
@@ -109,67 +108,102 @@ class TestSchemaCatalog(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestQdrantPayloadSchema(unittest.TestCase):
-    """Verify Qdrant payload schema is consistent with domain models."""
+    """Verify the CANONICAL Qdrant payload contract.
 
-    def test_payload_has_all_required_fields(self) -> None:
-        payload = QdrantChunkPayload(
+    The single source of truth is
+    ``QdrantSemanticChunkStoreAdapter._build_payload`` (production) plus the
+    ``QDRANT_COLLECTION_CONFIG`` documented alongside it. The previously
+    separate ``schemas/qdrant_payload.py`` was deprecated and removed
+    (audit CG-001) so tests validate exactly what production writes.
+
+    ``_build_payload`` is pure (no I/O), so we exercise it on an instance
+    created without touching Qdrant.
+    """
+
+    def _adapter(self) -> QdrantSemanticChunkStoreAdapter:
+        # Bypass __init__ (which would call _ensure_collection / hit Qdrant);
+        # _build_payload only reads instance-independent chunk data.
+        adapter = object.__new__(QdrantSemanticChunkStoreAdapter)
+        adapter._encryption_key = ""  # keep payload plaintext for assertions
+        return adapter
+
+    def _make_chunk(self, **overrides: Any) -> SemanticChunkRecord:
+        base = dict(
             chunk_id="doc1:v1:c0",
             document_id="doc1",
             version=1,
             chunk_index=0,
             page_number=1,
             text="hello world",
-            char_start=0,
-            char_end=11,
-            privacy="OPEN",
-            file_kind="PDF",
+            start_char=0,
+            end_char=11,
+            privacy=DocumentPrivacyClassification.OPEN,
+            metadata={},
+            description="A test document",
             original_filename="test.pdf",
             content_type="application/pdf",
-            description="A test document",
-            semantic_index_status="INDEXED",
         )
-        d = payload.to_qdrant_payload()
+        base.update(overrides)
+        return SemanticChunkRecord(**base)
+
+    def test_payload_has_all_required_fields(self) -> None:
+        d = self._adapter()._build_payload(self._make_chunk())
         self.assertEqual(d["chunk_id"], "doc1:v1:c0")
         self.assertEqual(d["document_id"], "doc1")
         self.assertEqual(d["version"], 1)
         self.assertEqual(d["page_number"], 1)
         self.assertEqual(d["privacy"], "OPEN")
         self.assertEqual(d["text"], "hello world")
+        # Production uses start_char/end_char naming (not char_start).
+        self.assertEqual(d["start_char"], 0)
+        self.assertEqual(d["end_char"], 11)
 
     def test_payload_serialization_is_flat_dict(self) -> None:
-        payload = QdrantChunkPayload(
-            chunk_id="x", document_id="x", version=1, chunk_index=0,
-            page_number=None, text="", char_start=0, char_end=0,
-            privacy="PRIVATE", file_kind="IMAGE", original_filename="x.png",
-            content_type=None, description=None,
-            semantic_index_status="PENDING",
+        d = self._adapter()._build_payload(
+            self._make_chunk(
+                privacy=DocumentPrivacyClassification.SENSITIVE,
+                original_filename="x.png",
+                content_type=None,
+                description=None,
+            )
         )
-        d = payload.to_qdrant_payload()
         self.assertIsInstance(d, dict)
-        # page_number should be omitted when None
-        self.assertNotIn("page_number", d)
+        # No nested payload objects — every value is a scalar/list/dict primitive.
+        for value in d.values():
+            self.assertNotIsInstance(value, SemanticChunkRecord)
 
-    def test_payload_from_chunk_record(self) -> None:
-        record = SemanticChunkRecord(
-            chunk_id="doc1:v1:c0",
-            document_id="doc1",
-            version=1,
-            chunk_index=0,
-            page_number=2,
-            text="extracted text",
-            start_char=100,
-            end_char=115,
-            privacy=DocumentPrivacyClassification.SENSITIVE,
-            metadata={"file_kind": "PDF", "semantic_index_status": "INDEXED"},
-            description="safe description",
-            original_filename="secret.pdf",
-            content_type="application/pdf",
+    def test_payload_surfaces_plaintext_filter_fields(self) -> None:
+        # field_pointers / owner_type / relation / user_id must be surfaced
+        # as top-level plaintext so Qdrant can filter without decrypting.
+        d = self._adapter()._build_payload(
+            self._make_chunk(
+                metadata={
+                    "field_pointers": ["aadhaar_number", "name"],
+                    "owner_type": "SELF",
+                    "relation": None,
+                },
+                user_id="user-123",
+            )
         )
-        payload = QdrantChunkPayload.from_chunk_record(record)
-        self.assertEqual(payload.chunk_id, "doc1:v1:c0")
-        self.assertEqual(payload.privacy, "SENSITIVE")
-        self.assertEqual(payload.page_number, 2)
-        self.assertEqual(payload.char_start, 100)
+        self.assertEqual(d["field_pointers"], ["aadhaar_number", "name"])
+        self.assertEqual(d["owner_type"], "SELF")
+        self.assertEqual(d["user_id"], "user-123")
+
+    def test_payload_defaults_user_to_local(self) -> None:
+        d = self._adapter()._build_payload(self._make_chunk())
+        self.assertEqual(d["user_id"], "__local__")
+
+    def test_payload_carries_chunk_id_and_provenance(self) -> None:
+        chunk = self._make_chunk(
+            chunk_id="doc1:v1:c0", document_id="doc1", version=1, page_number=2,
+            start_char=100, end_char=115,
+            privacy=DocumentPrivacyClassification.SENSITIVE,
+        )
+        d = self._adapter()._build_payload(chunk)
+        self.assertEqual(d["chunk_id"], "doc1:v1:c0")
+        self.assertEqual(d["privacy"], "SENSITIVE")
+        self.assertEqual(d["page_number"], 2)
+        self.assertEqual(d["start_char"], 100)
 
     def test_qdrant_collection_config_exists(self) -> None:
         self.assertIn("name", QDRANT_COLLECTION_CONFIG)
@@ -178,6 +212,25 @@ class TestQdrantPayloadSchema(unittest.TestCase):
         self.assertIn("document_id", QDRANT_COLLECTION_CONFIG["indexed_payload_fields"])
         self.assertIn("privacy", QDRANT_COLLECTION_CONFIG["indexed_payload_fields"])
         self.assertIn("version", QDRANT_COLLECTION_CONFIG["indexed_payload_fields"])
+        self.assertIn("chunk_id", QDRANT_COLLECTION_CONFIG["point_id_strategy"].lower())
+
+    def test_config_indexed_fields_are_actually_plaintext_in_payload(self) -> None:
+        # Guard against future drift: every documented plaintext filter field
+        # (that _build_payload can populate) must appear as a top-level key.
+        d = self._adapter()._build_payload(
+            self._make_chunk(
+                metadata={
+                    "field_pointers": ["x"],
+                    "owner_type": "SELF",
+                    "relation": "mother",
+                },
+                user_id="u1",
+            )
+        )
+        for key in ("chunk_id", "document_id", "version", "chunk_index",
+                    "page_number", "privacy", "field_pointers", "owner_type",
+                    "relation", "user_id"):
+            self.assertIn(key, d, f"{key} documented as indexed but missing from payload")
 
     def test_point_id_strategy_uses_chunk_id(self) -> None:
         self.assertIn("chunk_id", QDRANT_COLLECTION_CONFIG["point_id_strategy"].lower())
@@ -303,9 +356,10 @@ class TestBidirectionalTraceability(unittest.TestCase):
             expected = f"{doc_id}:v{version}:c{i}"
             self.assertEqual(chunk.chunk_id, expected)
 
-            # Qdrant payload should carry the same chunk_id
-            payload = QdrantChunkPayload.from_chunk_record(chunk)
-            qdrant_dict = payload.to_qdrant_payload()
+            # Qdrant payload (production builder) should carry the same chunk_id
+            adapter = object.__new__(QdrantSemanticChunkStoreAdapter)
+            adapter._encryption_key = ""
+            qdrant_dict = adapter._build_payload(chunk)
             self.assertEqual(qdrant_dict["chunk_id"], expected)
             self.assertEqual(qdrant_dict["document_id"], doc_id)
             self.assertEqual(qdrant_dict["version"], version)

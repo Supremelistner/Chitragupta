@@ -4,7 +4,8 @@ This module is the read-side counterpart of the ingestion pipeline. When the
 user (or the orchestrator) asks for a specific field value (e.g. "what is my
 Aadhaar number?"), the service:
 
-1. Loads the document version from Postgres (encrypted at rest).
+1. Loads the document version from Postgres (extracted_fields is plaintext
+   JSONB at rest; see the privacy boundary note in README.md).
 2. Looks up the requested field in ``extracted_fields``.
 3. Returns a structured response that names the source document but does NOT
    embed any URL \u2014 the chat UI shows "Source: <name> (<relation>)" and a

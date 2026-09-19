@@ -481,11 +481,19 @@ class OrchestrationEngine:
                 )
         return new_response
 
-    def _field_approval_key(self, tool_name: str, arguments: dict) -> str | None:
+    def _field_approval_key(
+        self, tool_name: str, arguments: dict, user_id: str | None = None,
+    ) -> str | None:
         """Build a cache key for per-tool, per-field approval reuse.
 
         Only get_field_value is currently cached; other gated tools
         always prompt. Returns None for non-cacheable tools.
+
+        The user segment is scoped to the authenticated caller: prefer the
+        explicit ``user_id`` (derived from the session that owns the turn),
+        then the engine-level ``self._user_id``, then the local fallback.
+        Passing the session's owner keeps approvals from leaking across
+        users on a shared engine instance.
         """
         if tool_name != "get_field_value":
             return None
@@ -494,7 +502,11 @@ class OrchestrationEngine:
         field = str(arguments.get("field", arguments.get("field_name", "")))
         if not document_id or not field:
             return None
-        user_segment = self._user_id or session_fallback_user_id(self._sessions)
+        user_segment = (
+            (user_id or "").strip()
+            or self._user_id
+            or session_fallback_user_id(self._sessions)
+        )
         return f"{user_segment}|{tool_name}|{document_id}|{version}|{field}"
 
     def _field_approval_is_fresh(self, key: str) -> bool:
@@ -516,7 +528,8 @@ class OrchestrationEngine:
         )
 
     def handle_confirmation(
-        self, session_id: str, request_id: str, approved: bool, correction: str | None = None
+        self, session_id: str, request_id: str, approved: bool, correction: str | None = None,
+        user_id: str | None = None,
     ) -> OrchestratorResponse:
         """Handle user's confirmation response.
 
@@ -524,9 +537,13 @@ class OrchestrationEngine:
         HTTP layer translates user input from the UI language before
         passing it in; the orchestrator itself never speaks anything but
         English internally.
+
+        ``user_id`` is the authenticated caller (when present). A token
+        holder may only confirm on their own sessions; approving another
+        account's session is refused.
         """
         response = self._handle_confirmation_english(
-            session_id, request_id, approved, correction
+            session_id, request_id, approved, correction, user_id=user_id,
         )
         return self._translate_response(response)
 
@@ -536,19 +553,36 @@ class OrchestrationEngine:
         request_id: str,
         approved: bool,
         correction: str | None = None,
+        user_id: str | None = None,
     ) -> OrchestratorResponse:
         """Inner ``handle_confirmation`` that operates in English only."""
         # correction is the user-supplied corrected field name when they
         # deny a confirmation because the LLM picked the wrong field.
+        #
+        # Tenancy guard: an authenticated caller may only confirm on a
+        # session they own. This mirrors the binding in
+        # _process_message_english so the confirm route cannot approve a
+        # sensitive-field reveal on another account's session.
+        if user_id:
+            _sess = self._sessions.get(session_id)
+            if _sess is not None and _sess.user_id and _sess.user_id != user_id:
+                return OrchestratorResponse(
+                    session_id=session_id,
+                    message="This chat belongs to another account. Please start a new chat.",
+                )
         self._confirmations.respond(request_id, approved, correction=correction)
 
         # Cache per-field approvals so the user is not re-prompted for the
-        # same field within TTL (default 2 hours).
+        # same field within TTL (default 2 hours). Scope the cache key to
+        # the session owner so one user's approval never satisfies another
+        # user's gate on a shared engine instance.
         if approved:
             confirmation = self._confirmations.get(request_id)
             if confirmation is not None:
+                owner = getattr(self._sessions.get(session_id), "user_id", None) or user_id
                 cache_key = self._field_approval_key(
-                    confirmation.tool_name, confirmation.tool_args
+                    confirmation.tool_name, confirmation.tool_args,
+                    user_id=owner,
                 )
                 if cache_key is not None:
                     self._record_field_approval(cache_key)
@@ -784,7 +818,10 @@ class OrchestrationEngine:
                 # already approved this exact (tool, document, field)
                 # within the TTL window. Lets "show me my aadhaar
                 # number" work without re-prompting on the next ask.
-                cache_key = self._field_approval_key(tool_call.tool_name, tool_call.arguments)
+                cache_key = self._field_approval_key(
+                    tool_call.tool_name, tool_call.arguments,
+                    user_id=getattr(session, "user_id", None),
+                )
                 if cache_key is not None and self._field_approval_is_fresh(cache_key):
                     logger.info(
                         "Field approval cache hit: key=%s; skipping confirmation gate",

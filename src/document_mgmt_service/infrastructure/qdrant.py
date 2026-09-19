@@ -24,6 +24,47 @@ from document_mgmt_service.domain.models import (
 logger = logging.getLogger("document_mgmt_service.qdrant")
 
 
+# Canonical Qdrant collection contract for V1. This lives next to the
+# production payload builder (``QdrantSemanticChunkStoreAdapter._build_payload``)
+# so the documentation and the implementation can never drift apart —
+# ``_build_payload`` is the single source of truth for payload shape, and
+# this dict documents the collection config + which payload keys are stored
+# in plaintext for filtering. ``indexed_payload_fields`` lists exactly the
+# top-level plaintext keys ``_build_payload`` emits that are safe to filter
+# on (everything else is Fernet-encrypted when an encryption key is set).
+QDRANT_COLLECTION_CONFIG = {
+    "name": "document_chunks",
+    "description": "Semantic retrieval index for document chunks.",
+    "vector_dimension": "configured via DOCUMENT_SERVICE_SEMANTIC_EMBED_DIM (default 256)",
+    "distance_metric": "Cosine",
+    # Plaintext, filterable payload keys emitted by _build_payload. These
+    # are never encrypted (they carry no raw PII — only pointers/categories).
+    "indexed_payload_fields": [
+        "chunk_id",
+        "document_id",
+        "version",
+        "chunk_index",
+        "page_number",
+        "privacy",
+        "field_pointers",
+        "owner_type",
+        "relation",
+        "user_id",
+    ],
+    "point_id_strategy": "chunk_id (deterministic string), mapped to a UUIDv5 point id",
+    "notes": [
+        "Qdrant is NOT the canonical store — use PostgreSQL for authoritative state.",
+        "Payload text/description/metadata are Fernet-encrypted at rest when an "
+        "encryption key is configured; only the indexed_payload_fields above stay plaintext.",
+        "field_pointers/owner_type/relation/user_id are plaintext so Qdrant can "
+        "filter (e.g. 'my mother's docs', tenant scope) without decrypting.",
+        "relation_name (a person's name) is deliberately NOT surfaced — it stays "
+        "inside the encrypted metadata blob.",
+        "point_id derives deterministically from chunk_id for bidirectional traceability.",
+    ],
+}
+
+
 class QdrantSemanticChunkStoreAdapter(SemanticChunkStore):
     """Qdrant-backed vector store.
 

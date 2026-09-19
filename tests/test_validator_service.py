@@ -769,5 +769,106 @@ class TestAadhaarValidationIntegration(unittest.TestCase):
         self.assertGreater(len(result.alerts), 0)
 
 
+class TestRiskThresholdBoundaries(unittest.TestCase):
+    """Boundary-value tests for the centralized risk-score policy.
+
+    The status/alert cutoffs live in validator_service.config
+    (RISK_INVALID_THRESHOLD, RISK_SUSPICIOUS_THRESHOLD). These tests pin
+    the exact classification at values immediately below, at, and above
+    each boundary so the config and the classifier can never silently
+    disagree. We drive risk directly through _combine_results with a
+    passing structural step and a synthetic model result: with structural
+    passing, final risk == model_result.risk_score * 0.7, so a model risk
+    of r/0.7 yields a final risk of exactly r.
+    """
+
+    def setUp(self):
+        self.registry = InMemoryTemplateRegistry()
+        self.service = ValidationService(template_registry=self.registry)
+        self.request = ValidationRequest(
+            document_id="doc-boundary",
+            version=1,
+            document_type="identity_document",
+            document_sub_type="aadhaar",
+            metadata={},
+        )
+        self.template = DocumentTemplate(
+            template_id="t-boundary",
+            document_type="identity_document",
+            document_sub_type="aadhaar",
+            variant_name="card_print",
+            description="boundary test template",
+            field_rules=(),
+            structural_rules=(),
+        )
+        self.structural_pass = ValidationStep(
+            step_name="structural", passed=True, confidence=0.9,
+        )
+
+    def _combine_at_risk(self, final_risk: float) -> ValidationResult:
+        """Build a result whose final risk_score == final_risk (structural passes)."""
+        model_risk = min(final_risk / 0.7, 1.0)
+        model_result = ValidationResult(
+            document_id=self.request.document_id,
+            version=1,
+            status=ValidationStatus.VALID,
+            risk_score=model_risk,
+            is_authentic=True,
+            steps=(ValidationStep(step_name="model", passed=True, confidence=0.9),),
+        )
+        return self.service._combine_results(
+            self.request, self.template, self.structural_pass, model_result, {},
+        )
+
+    def test_below_suspicious_is_valid(self):
+        # risk just under RISK_SUSPICIOUS_THRESHOLD (0.4) → VALID
+        result = self._combine_at_risk(0.39)
+        self.assertEqual(result.status, ValidationStatus.VALID)
+        self.assertEqual(len(result.alerts), 0)
+
+    def test_at_suspicious_boundary_is_suspicious(self):
+        # risk == RISK_SUSPICIOUS_THRESHOLD (0.4) → SUSPICIOUS (>= is inclusive)
+        result = self._combine_at_risk(0.40)
+        self.assertEqual(result.status, ValidationStatus.SUSPICIOUS)
+        self.assertEqual(result.alerts[0].severity, AlertSeverity.WARNING)
+
+    def test_between_boundaries_is_suspicious(self):
+        result = self._combine_at_risk(0.55)
+        self.assertEqual(result.status, ValidationStatus.SUSPICIOUS)
+        self.assertEqual(result.alerts[0].severity, AlertSeverity.WARNING)
+
+    def test_just_below_invalid_is_suspicious(self):
+        result = self._combine_at_risk(0.69)
+        self.assertEqual(result.status, ValidationStatus.SUSPICIOUS)
+
+    def test_at_invalid_boundary_is_invalid_critical(self):
+        # risk == RISK_INVALID_THRESHOLD (0.7) → INVALID + CRITICAL
+        result = self._combine_at_risk(0.70)
+        self.assertEqual(result.status, ValidationStatus.INVALID)
+        self.assertEqual(result.alerts[0].severity, AlertSeverity.CRITICAL)
+
+    def test_above_invalid_is_invalid_critical(self):
+        result = self._combine_at_risk(0.95)
+        self.assertEqual(result.status, ValidationStatus.INVALID)
+        self.assertEqual(result.alerts[0].severity, AlertSeverity.CRITICAL)
+
+    def test_structural_fail_forces_invalid_even_at_zero_model_risk(self):
+        # A structurally-failed doc is INVALID regardless of a low score.
+        structural_fail = ValidationStep(
+            step_name="structural", passed=False, confidence=0.9,
+        )
+        model_result = ValidationResult(
+            document_id=self.request.document_id, version=1,
+            status=ValidationStatus.VALID, risk_score=0.0, is_authentic=True,
+            steps=(ValidationStep(step_name="model", passed=True, confidence=0.9),),
+        )
+        result = self.service._combine_results(
+            self.request, self.template, structural_fail, model_result, {},
+        )
+        # structural fail adds 0.3 → below suspicious (0.4), but the explicit
+        # structural-fail branch still forces INVALID.
+        self.assertEqual(result.status, ValidationStatus.INVALID)
+
+
 if __name__ == "__main__":
     unittest.main()

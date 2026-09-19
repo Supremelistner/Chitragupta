@@ -150,7 +150,12 @@ def _split_fields(
     """Split a model's METADATA_EXTRACTION result into:
 
     * ``summary``  — a redacted, safe-to-show description (used for chat & Qdrant)
-    * ``extracted_fields``  — the full values, PII included (encrypted at rest in Postgres)
+    * ``extracted_fields``  — the full values, PII included. Stored as
+      plaintext JSONB in Postgres (a GIN index makes them queryable);
+      NOT encrypted at rest in the DB. Confidentiality rests on DB
+      access control + the two-step reveal gate + audit logging. See the
+      "Privacy and redaction guarantees" section of README.md for the
+      authoritative storage boundary. (Qdrant payloads ARE Fernet-encrypted.)
     * ``field_names``  — the keys, used to build Qdrant ``field_pointers``
 
     Accepts two shapes for ``fields``:

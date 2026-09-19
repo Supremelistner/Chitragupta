@@ -7,7 +7,7 @@ PostgreSQL structures used by this service.
 
 Ownership:
     PostgreSQL = canonical metadata, state, access policies, audit records.
-    Qdrant     = vectors + retrieval payload (see qdrant_payload.py).
+    Qdrant     = vectors + retrieval payload (see infrastructure/qdrant.py:_build_payload).
     Filesystem = document binaries only (see infrastructure/storage.py).
 """
 
@@ -159,7 +159,9 @@ MIGRATION_005 = Migration(
 -- Also splits the document body into:
 --   * summary  — short, redacted, safe to show
 --   * extracted_fields — structured values (license_number, dob, ...),
---                          encrypted at rest by the application
+--                          plaintext JSONB (GIN-indexed, queryable); NOT
+--                          encrypted at rest in the DB. See README.md
+--                          "Privacy and redaction guarantees".
 --   * expiry_date — used by the validator to flag expired docs
 -- The existing ``extracted_text`` column remains for backward compatibility.
 

@@ -10,7 +10,7 @@ that are shared across services:
 
 Ownership:
     PostgreSQL = canonical metadata, state, and provenance (this module)
-    Qdrant = vectors + retrieval payload (see qdrant_payload.py)
+    Qdrant = vectors + retrieval payload (see document_mgmt_service/infrastructure/qdrant.py)
     Filesystem = document binaries (see storage.py)
 """
 

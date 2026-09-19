@@ -31,6 +31,7 @@ from validator_service.domain.ports import (
     ModelValidator,
     TemplateRegistry,
 )
+from validator_service import config
 
 logger = logging.getLogger("validator_service.application")
 
@@ -100,7 +101,7 @@ class ValidationService:
         )
 
         # Dispatch alerts if needed
-        if result.risk_score > 0.5 or result.status in (ValidationStatus.INVALID, ValidationStatus.SUSPICIOUS):
+        if result.risk_score > config.ALERT_RISK_THRESHOLD or result.status in (ValidationStatus.INVALID, ValidationStatus.SUSPICIOUS):
             self._dispatch_alerts(result, request)
 
         return result
@@ -313,9 +314,9 @@ class ValidationService:
 
         # Determine status
         risk_score = min(risk_score, 1.0)
-        if risk_score >= 0.7:
+        if risk_score >= config.RISK_INVALID_THRESHOLD:
             status = ValidationStatus.INVALID
-        elif risk_score >= 0.4:
+        elif risk_score >= config.RISK_SUSPICIOUS_THRESHOLD:
             status = ValidationStatus.SUSPICIOUS
         elif not structural_result.passed:
             status = ValidationStatus.INVALID
@@ -325,7 +326,7 @@ class ValidationService:
         # Generate alerts
         alerts: list[AlertPayload] = []
         if status in (ValidationStatus.INVALID, ValidationStatus.SUSPICIOUS):
-            severity = AlertSeverity.CRITICAL if risk_score >= 0.7 else AlertSeverity.WARNING
+            severity = AlertSeverity.CRITICAL if risk_score >= config.RISK_INVALID_THRESHOLD else AlertSeverity.WARNING
             alert_type = "fake_document" if not is_authentic else "structure_mismatch"
             alerts.append(AlertPayload(
                 document_id=request.document_id,

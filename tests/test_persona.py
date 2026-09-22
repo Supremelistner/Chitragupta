@@ -90,6 +90,32 @@ class HumanizeTests(unittest.TestCase):
         out = humanize(reply)
         self.assertEqual(out, "All done saving your file.")
 
+    def test_raw_provider_error_becomes_friendly_line(self) -> None:
+        # The LLM adapters return content="Error: <status> ..." when every
+        # provider is down/rate-limited. It must never reach the user raw.
+        reply = (
+            "Error: 503 UNAVAILABLE. {'error': {'code': 503, 'message': "
+            "'This model is currently experiencing high demand.', "
+            "'status': 'UNAVAILABLE'}}"
+        )
+        out = humanize(reply)
+        self.assertNotIn("503", out)
+        self.assertNotIn("UNAVAILABLE", out)
+        self.assertNotIn("{", out)
+        self.assertIn("try again", out.lower())
+
+    def test_rate_limit_error_becomes_friendly_line(self) -> None:
+        out = humanize("Error: 429 rate limit exceeded")
+        self.assertNotIn("429", out)
+        self.assertIn("try again", out.lower())
+
+    def test_normal_reply_mentioning_error_word_is_untouched(self) -> None:
+        # A legitimate reply that happens to contain "error" must NOT be
+        # swallowed — only raw provider-error envelopes are mapped.
+        reply = "I could not find an error in your document. It looks complete."
+        out = humanize(reply)
+        self.assertEqual(out, reply)
+
 
 class SystemPromptTests(unittest.TestCase):
     """Behavioral checks on the system prompt.

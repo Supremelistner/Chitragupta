@@ -72,6 +72,41 @@ alongside the ciphertext). The plaintext `field_pointers` and
 or "all docs that have an aadhaar number" without ever exposing the value
 at the vector layer.
 
+## Managing your documents (list, open, delete)
+
+The chat UI's **Settings → My Documents** panel lists every document you
+have saved and lets you open or delete each one. All three actions have
+dedicated, user-scoped orchestrator endpoints (the JWT owner is the only
+account that can see or touch its documents):
+
+```bash
+# List the signed-in user's stored documents (names, type, versions, expiry)
+curl http://127.0.0.1:8084/api/documents -H "Authorization: Bearer ***"
+
+# Open the original file. Sensitive documents are gated: the first call
+# returns 202 {"status":"requires_confirmation"}; repeat with ?approve=true
+# (after the user confirms) to stream the original file back.
+curl http://127.0.0.1:8084/api/documents/<id>/versions/1/retrieve -H "Authorization: Bearer ***"
+curl "http://127.0.0.1:8084/api/documents/<id>/versions/1/retrieve?approve=true" -H "Authorization: Bearer ***"
+
+# Delete. Omit ?version to delete the whole document (all versions);
+# pass ?version=N to delete only that version. Cascades across Postgres,
+# file storage, Qdrant vectors, and the device-sync hub.
+curl -X DELETE http://127.0.0.1:8084/api/documents/<id> -H "Authorization: Bearer ***"
+curl -X DELETE "http://127.0.0.1:8084/api/documents/<id>?version=2" -H "Authorization: Bearer ***"
+```
+
+Retrieve is driven by code (the document id comes from your own document
+list, never the LLM), so it reuses the proven approval gate without any
+risk of a hallucinated id. `delete_document` is a registered tool but is
+**not** exposed to the chat LLM — deletion only happens through explicit
+UI action.
+
+**Chats vs documents are independent.** Deleting a chat session
+(the trash icon in the sidebar, or `DELETE /api/sessions/{id}`) removes
+only the conversation record — your uploaded documents are untouched.
+Deleting a document never affects your chats.
+
 ## Quick start
 
 **Prerequisite: Docker must be running.** Postgres + Qdrant run in Docker

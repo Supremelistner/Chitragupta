@@ -1081,6 +1081,13 @@
             approved,
             correction,
         };
+        // Immediate feedback: hide the pill and show the thinking indicator
+        // NOW, before the (multi-second) backend tool + LLM-summary round
+        // trip. Without this the pill sat frozen and the reply felt "late".
+        hideConfirmation();
+        stopAllTts();
+        showThinkingRow();
+        scrollToBottom();
         try {
             const r = await fetch(API + '/api/confirm', {
                 method: 'POST',
@@ -1089,12 +1096,14 @@
             });
             if (!r.ok) throw new Error(`HTTP ${r.status}`);
             const data = await r.json();
-            hideConfirmation();
+            removeThinkingRow();
             if (data.message) {
                 autoSpeakRow(appendMessage('assistant', data.message, 'msg-' + Date.now()));
             }
         } catch (e) {
             console.error('respondConfirmation failed', e);
+            removeThinkingRow();
+            appendMessage('assistant', t('error_network'));
         } finally {
             state.confirmBusy = false;
             els.btnApprove.disabled = false;

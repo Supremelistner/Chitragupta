@@ -35,9 +35,10 @@ class FallbackLLMProvider(LLMProvider):
             error_msg = result.content.lower()
             is_recoverable = any(
                 kw in error_msg
-                for kw in ["402", "429", "payment required", "rate limit",
-                           "quota", "credit", "insufficient", "timeout",
-                           "request limit"]
+                for kw in ["402", "429", "500", "503", "payment required",
+                           "rate limit", "quota", "credit", "insufficient",
+                           "timeout", "request limit", "unavailable",
+                           "overloaded", "high demand", "try again"]
             )
             if is_recoverable:
                 logger.warning(

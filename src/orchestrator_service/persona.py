@@ -79,18 +79,55 @@ def _salvage_json_blob(obj):
     return None
 
 
+_PROVIDER_ERROR_RE = re.compile(
+    r"\b(unavailable|overloaded|high demand|rate limit|quota|"
+    r"payment required|insufficient|timeout|try again later|"
+    r"service unavailable|internal server error|502|503|429|500)\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_provider_error(text):
+    """True if ``text`` is a raw LLM-provider error string, not a real reply.
+
+    Providers return ``content="Error: <status> ..."`` when they fail (see
+    the *_llm_provider adapters). Such a string must never reach the user;
+    humanize() maps it to one plain, speakable line instead.
+    """
+    s = (text or "").strip()
+    if not s:
+        return False
+    if s.startswith("Error:"):
+        return True
+    # Defensive: a bare provider status dict/phrase that slipped through
+    # without the "Error:" prefix.
+    return bool(_PROVIDER_ERROR_RE.search(s)) and (
+        s.startswith("{") or "status" in s.lower() and "code" in s.lower()
+    )
+
+
 def humanize(reply):
     """Post-process an LLM reply so it reads as a friendly agent, not a tool dump.
 
     Policy clauses: §2 (voice rules), §10 (failure handling).
 
     Applied on EVERY reply path (direct answer, post-tool follow-up, and
-    post-confirmation), so JSON/code-fence/URL leakage cannot reach the
-    user regardless of how the model chose to respond.
+    post-confirmation), so JSON/code-fence/URL leakage — and raw provider
+    error strings — cannot reach the user regardless of how the model (or a
+    failing provider) responded.
     """
     if not reply:
         return reply
     text = reply
+    # Raw provider error leaked as the reply content (e.g. the LLM adapter
+    # returns "Error: 503 UNAVAILABLE {...}" when every provider is down or
+    # rate-limited). Never show the raw error / status dict to the user —
+    # especially an elderly user hearing it aloud. Map it to one plain line.
+    if _looks_like_provider_error(text):
+        return (
+            "I could not reach my assistant service just now. "
+            "Please wait a moment and try again."
+        )
     text = _FENCE_RE.sub(lambda m: m.group(1).strip(), text)
     text = _URL_RE.sub("", text)
     blob = _parse_json_blob(text)

@@ -156,8 +156,16 @@ The MCP server exposes document-level operations only:
 - `get_page`
 - `get_document`
 - `request_sensitive_access`
+- `delete_document`
 
 It does not expose raw Qdrant, PostgreSQL, OCR, or storage operations.
+
+`delete_document` cascades across all three stores in one call — Postgres
+rows (versions plus the parent row, with `latest_version` recomputed when
+only some versions are removed), the file-storage blobs for exactly the
+deleted versions, and the Qdrant vectors. It is scoped by `user_id`, so an
+account can only delete its own documents, and it is *not* offered to the
+chat LLM — deletion is a UI-initiated action only.
 
 ---
 

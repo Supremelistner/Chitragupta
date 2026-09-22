@@ -22,40 +22,91 @@ _FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
 _URL_RE = re.compile(r"https?://[^\s)\]\"'>]+", re.IGNORECASE)
 
 
-def _looks_like_json_blob(text):
+def _parse_json_blob(text):
+    """Return the parsed object if ``text`` is a whole JSON object/array, else None."""
     s = text.strip()
     if not s:
-        return False
-    if s.startswith("{") and s.endswith("}"):
+        return None
+    if (s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]")):
         try:
-            json.loads(s)
-            return True
+            return json.loads(s)
         except json.JSONDecodeError:
-            return False
-    if s.startswith("[") and s.endswith("]"):
-        try:
-            json.loads(s)
-            return True
-        except json.JSONDecodeError:
-            return False
-    return False
+            return None
+    return None
+
+
+def _looks_like_json_blob(text):
+    return _parse_json_blob(text) is not None
+
+
+# Keys an LLM commonly uses to carry the human-readable answer when it
+# wrongly wraps a reply in JSON. Checked in order; first hit wins.
+_PROSE_KEYS = (
+    "message", "answer", "reply", "response", "text", "content",
+    "summary", "result", "output", "value",
+)
+
+
+def _salvage_json_blob(obj):
+    """Best-effort: pull human prose out of a JSON object the LLM emitted by mistake.
+
+    Returns a plain-language string, or None if nothing usable is found.
+    Handles the common shapes: {"message": "..."}, nested prose keys, and
+    a bare list of strings. Never returns raw JSON.
+    """
+    if isinstance(obj, str):
+        return obj.strip() or None
+    if isinstance(obj, dict):
+        for key in _PROSE_KEYS:
+            if key in obj:
+                salvaged = _salvage_json_blob(obj[key])
+                if salvaged:
+                    return salvaged
+        # No known prose key: recurse into every value and, if exactly one
+        # yields readable prose, use it (handles single-entry wrappers and
+        # one nested prose object). Ambiguous multi-value blobs fall through.
+        candidates = [_salvage_json_blob(v) for v in obj.values()]
+        candidates = [c for c in candidates if c]
+        if len(candidates) == 1:
+            return candidates[0]
+        return None
+    if isinstance(obj, list):
+        parts = [_salvage_json_blob(item) for item in obj]
+        parts = [p for p in parts if p]
+        if parts:
+            return " ".join(parts)
+        return None
+    return None
 
 
 def humanize(reply):
     """Post-process an LLM reply so it reads as a friendly agent, not a tool dump.
 
     Policy clauses: §2 (voice rules), §10 (failure handling).
+
+    Applied on EVERY reply path (direct answer, post-tool follow-up, and
+    post-confirmation), so JSON/code-fence/URL leakage cannot reach the
+    user regardless of how the model chose to respond.
     """
     if not reply:
         return reply
     text = reply
     text = _FENCE_RE.sub(lambda m: m.group(1).strip(), text)
     text = _URL_RE.sub("", text)
-    if _looks_like_json_blob(text):
-        return (
-            "I had an answer ready, but I ended up formatting it as data. "
-            "Could you rephrase your question so I can answer in plain language?"
-        )
+    blob = _parse_json_blob(text)
+    if blob is not None:
+        # The model wrapped its answer as data. Salvage the prose instead
+        # of asking the user (who may be elderly, hearing this aloud) to
+        # rephrase. Only fall back to the rephrase ask if nothing readable
+        # can be recovered.
+        salvaged = _salvage_json_blob(blob)
+        if salvaged and not _looks_like_json_blob(salvaged):
+            text = salvaged
+        else:
+            return (
+                "I had an answer ready, but I ended up formatting it as data. "
+                "Could you rephrase your question so I can answer in plain language?"
+            )
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
     return text
 

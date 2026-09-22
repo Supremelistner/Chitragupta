@@ -154,27 +154,55 @@ body {
 }
 
 .session-item {
-    padding: 14px 16px;
+    padding: 6px 8px 6px 16px;
     border-radius: var(--radius-sm);
-    cursor: pointer;
     margin-bottom: 4px;
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: 4px;
     min-height: var(--tap);
     transition: background 0.15s;
 }
 .session-item:hover { background: var(--bg-hover); }
 .session-item.active { background: var(--bg-active); }
+.session-main {
+    flex: 1;
+    min-width: 0;
+    cursor: pointer;
+    padding: 8px 0;
+}
 .session-item .session-title {
     font-size: 16px;
     font-weight: 500;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    flex: 1; min-width: 0;
 }
 .session-item .session-time { font-size: 12px; color: var(--text-muted); }
+
+/* Delete button: hidden until row hover/focus, so the sidebar stays calm.
+   When "armed" (first tap) it turns danger-red to signal the confirm tap. */
+.session-delete {
+    width: 40px;
+    height: 40px;
+    flex: none;
+    opacity: 0;
+    color: var(--text-muted);
+    transition: opacity 0.15s, background 0.15s, color 0.15s;
+}
+.session-item:hover .session-delete,
+.session-item:focus-within .session-delete { opacity: 1; }
+.session-delete:hover { background: var(--warning-soft); color: var(--danger); }
+.session-delete.armed {
+    opacity: 1;
+    background: var(--danger);
+    color: #fff;
+    animation: pulseArm 0.9s ease-in-out infinite;
+}
+@keyframes pulseArm {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(179, 38, 30, 0.4); }
+    50%      { box-shadow: 0 0 0 5px rgba(179, 38, 30, 0); }
+}
 
 .empty-sidebar {
     text-align: center;
@@ -732,6 +760,7 @@ body {
     flex-direction: column;
     gap: 20px;
     color: var(--text);
+    overflow-y: auto;
     animation: slideInRight 0.22s ease;
 }
 @keyframes slideInRight {
@@ -847,3 +876,98 @@ body {
 .composer-mic[hidden],
 .expiry-banner[hidden],
 .welcome[hidden] { display: none !important; }
+
+/* ─── Buttons: danger + ghost variants ─────────────────────── */
+.btn-danger {
+    background: var(--danger);
+    color: #fff;
+    border-color: transparent;
+}
+.btn-danger:hover { background: #8f1e17; }
+.btn-ghost {
+    background: transparent;
+    color: var(--text-dim);
+    border-color: transparent;
+}
+.btn-ghost:hover { background: var(--bg-hover); color: var(--text); }
+
+/* ─── My Documents panel (settings drawer) ─────────────────── */
+.settings-divider {
+    height: 1px;
+    background: var(--border);
+    margin: 4px 0;
+}
+.documents-section { display: flex; flex-direction: column; gap: 10px; }
+.documents-heading { font-size: 20px; font-weight: 700; color: var(--text); }
+.documents-hint { font-size: 14px; color: var(--text-dim); line-height: 1.5; }
+.documents-list { display: flex; flex-direction: column; gap: 10px; margin-top: 4px; }
+.documents-empty {
+    text-align: center;
+    padding: 24px 16px;
+    color: var(--text-muted);
+    font-size: 15px;
+}
+.document-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 14px 16px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+}
+.document-info { flex: 1; min-width: 0; }
+.document-name {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.document-sub {
+    font-size: 13px;
+    color: var(--text-muted);
+    margin-top: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.document-actions { display: flex; gap: 8px; flex: none; }
+.btn-doc {
+    padding: 8px 14px;
+    min-height: 40px;
+    font-size: 14px;
+    font-weight: 600;
+    border-radius: 999px;
+    cursor: pointer;
+}
+
+/* ─── Dynamic (promise-based) modals ───────────────────────── */
+.modal-dynamic { display: flex; }
+.modal-actions {
+    display: flex;
+    gap: 12px;
+    margin-top: 24px;
+    justify-content: center;
+}
+.modal-actions .btn { flex: 1; }
+.modal-actions-stacked {
+    flex-direction: column;
+}
+.modal-actions-stacked .btn { width: 100%; }
+
+/* ─── Design refresh: warmer message bubbles + welcome ─────── */
+.message.assistant .message-bubble {
+    border-bottom-left-radius: 6px;
+    box-shadow: var(--shadow);
+    border-color: var(--border);
+}
+.message.user .message-bubble {
+    background: var(--bg-msg-user);
+    border-color: transparent;
+    border-bottom-right-radius: 6px;
+    box-shadow: 0 1px 3px rgba(60, 50, 30, 0.06);
+}
+.message-bubble { transition: box-shadow 0.15s; }
+.message.assistant .message-bubble:hover { box-shadow: var(--shadow-lg); }

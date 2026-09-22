@@ -43,6 +43,22 @@ _TOOL_DEFINITIONS: dict[str, tuple[ServiceTarget, str, dict[str, Any], Confirmat
         {"type": "object", "properties": {}},
         None,
     ),
+    "delete_document": (
+        ServiceTarget.DOCUMENT,
+        "Permanently delete a stored document, or a single version of it. "
+        "Deleting the whole document removes every version. This is "
+        "irreversible. Used by the document-management UI, not by the "
+        "chat agent — deletions always go through explicit user action.",
+        {
+            "type": "object",
+            "properties": {
+                "document_id": {"type": "string", "description": "The document to delete"},
+                "version": {"type": "integer", "description": "Optional: delete only this version. Omit to delete all versions."},
+            },
+            "required": ["document_id"],
+        },
+        None,
+    ),
     "list_expiring_documents": (
         ServiceTarget.DOCUMENT,
         "List documents expiring within N days (overdue ones included, most urgent first). Returns safe summaries with days_until_expiry (negative = already expired). Use when the user asks about renewals, validity, or expiring documents.",

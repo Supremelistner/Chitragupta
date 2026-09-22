@@ -52,6 +52,44 @@ class HumanizeTests(unittest.TestCase):
         self.assertEqual(humanize(""), "")
         self.assertEqual(humanize(None or ""), "")
 
+    def test_salvages_message_key_from_json_blob(self) -> None:
+        # The model wrapped its answer in JSON with a "message" key. We
+        # should surface the prose, not ask the user to rephrase.
+        reply = '{"message": "I found your Aadhaar card.", "confidence": 0.9}'
+        out = humanize(reply)
+        self.assertEqual(out, "I found your Aadhaar card.")
+        self.assertNotIn("{", out)
+        self.assertNotIn("confidence", out)
+
+    def test_salvages_answer_key_from_json_blob(self) -> None:
+        reply = '{"answer": "Your PAN card expires next month."}'
+        out = humanize(reply)
+        self.assertEqual(out, "Your PAN card expires next month.")
+
+    def test_salvages_single_string_value(self) -> None:
+        # No known prose key, but exactly one string value -> use it.
+        reply = '{"foo": "Here is your document summary."}'
+        out = humanize(reply)
+        self.assertEqual(out, "Here is your document summary.")
+
+    def test_salvages_list_of_strings(self) -> None:
+        reply = '["First point.", "Second point."]'
+        out = humanize(reply)
+        self.assertIn("First point.", out)
+        self.assertIn("Second point.", out)
+        self.assertNotIn("[", out)
+
+    def test_unrecoverable_json_falls_back_to_one_liner(self) -> None:
+        # Numeric-only blob: nothing readable to salvage.
+        reply = '{"code": 200, "count": 3}'
+        out = humanize(reply)
+        self.assertIn("plain language", out)
+
+    def test_nested_prose_key_is_salvaged(self) -> None:
+        reply = '{"data": {"reply": "All done saving your file."}}'
+        out = humanize(reply)
+        self.assertEqual(out, "All done saving your file.")
+
 
 class SystemPromptTests(unittest.TestCase):
     """Behavioral checks on the system prompt.

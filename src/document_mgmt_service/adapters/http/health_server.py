@@ -607,7 +607,9 @@ class _DocumentRequestHandler(BaseHTTPRequestHandler):
         "search_document_content": "_tool_search_content",
         "get_evidence": "_tool_get_evidence",
         "get_field_value": "_tool_get_field_value",
+        "get_document": "_tool_get_document",
         "upload_document": "_tool_upload_document",
+        "delete_document": "_tool_delete_document",
     }
 
     def _handle_tool_dispatch(self, tool_name: str, *, query_params: bool) -> None:
@@ -657,6 +659,23 @@ class _DocumentRequestHandler(BaseHTTPRequestHandler):
         user_id = args.get("user_id") or self.headers.get("X-User-Id") or None
         results = self.access_service.list_documents(user_id=user_id)
         self._send_json(HTTPStatus.OK, results)
+
+    def _tool_delete_document(self, args: dict) -> None:
+        document_id = self._required_field(args, "document_id")
+        raw_version = args.get("version")
+        try:
+            version = int(raw_version) if raw_version not in (None, "", "all") else None
+        except (TypeError, ValueError):
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "version must be an integer or omitted"})
+            return
+        try:
+            result = self.access_service.delete_document(
+                document_id, version=version, user_id=self._request_user_id(args)
+            )
+        except KeyError as exc:
+            self._send_json(HTTPStatus.NOT_FOUND, {"error": str(exc)})
+            return
+        self._send_json(HTTPStatus.OK, result)
 
     def _tool_list_expiring_documents(self, args: dict) -> None:
         try:
@@ -829,8 +848,13 @@ class _DocumentRequestHandler(BaseHTTPRequestHandler):
     def _tool_get_document(self, args: dict) -> None:
         document_id = self._required_field(args, "document_id")
         version = int(self._required_field(args, "version"))
+        approve = bool(args.get("approve") or args.get("approval_granted"))
         try:
-            response = self.access_service.retrieve_document(document_id, version, user_id=self._request_user_id(args))
+            response = self.access_service.retrieve_document(
+                document_id, version,
+                user_id=self._request_user_id(args),
+                approval_granted=approve,
+            )
         except (ApprovalRequiredError, AccessDeniedError) as exc:
             self._send_json(HTTPStatus.FORBIDDEN, {
                 "error": str(exc),

@@ -127,6 +127,11 @@ class DocumentAccessPolicy:
         if record.privacy == DocumentPrivacyClassification.OPEN:
             return AccessDecision(AccessAction.ALLOW, "open documents may be retrieved in full")
         if record.privacy == DocumentPrivacyClassification.SENSITIVE:
+            # The owner may retrieve their own sensitive document once they
+            # have explicitly approved it (the confirmation gate). Approval
+            # IS the gate — without it, retrieval still requires approval.
+            if request.approval_granted:
+                return AccessDecision(AccessAction.ALLOW, "approval granted for full-document retrieval")
             return AccessDecision(AccessAction.REQUIRE_APPROVAL, "sensitive documents require approval before full retrieval", approval_required=True)
         if record.privacy in {DocumentPrivacyClassification.OPEN_NOT_PUBLIC, DocumentPrivacyClassification.PRIVATE}:
             if request.approval_granted:
@@ -433,13 +438,14 @@ class DocumentAccessService:
         }
         return AccessResponse(decision=decision, payload=payload)
 
-    def get_document(self, document_id: str, version: int, *, requestor: str | None = None, user_id: str | None = None) -> AccessResponse:
+    def get_document(self, document_id: str, version: int, *, requestor: str | None = None, user_id: str | None = None, approval_granted: bool = False) -> AccessResponse:
         record = self._load_record(document_id, version, user_id=user_id)
         request = AccessRequest(
             document_id=document_id,
             version=version,
             intent=AccessIntent.WHOLE_DOCUMENT,
             requestor=requestor,
+            approval_granted=approval_granted,
         )
         decision = self._policy.evaluate(record=record, request=request)
         self._audit(record, request, decision)
@@ -460,8 +466,79 @@ class DocumentAccessService:
         }
         return AccessResponse(decision=decision, payload=payload)
 
-    def retrieve_document(self, document_id: str, version: int, *, requestor: str | None = None, user_id: str | None = None) -> AccessResponse:
-        return self.get_document(document_id, version, requestor=requestor, user_id=user_id)
+    def retrieve_document(self, document_id: str, version: int, *, requestor: str | None = None, user_id: str | None = None, approval_granted: bool = False) -> AccessResponse:
+        return self.get_document(document_id, version, requestor=requestor, user_id=user_id, approval_granted=approval_granted)
+
+    def delete_document(
+        self,
+        document_id: str,
+        version: int | None = None,
+        *,
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Permanently delete a document across every store.
+
+        Cascade order (Postgres first so a partial failure never leaves a
+        dangling row that points at missing blobs):
+          1. Postgres rows (versions + parent) — returns freed storage keys.
+          2. File-storage blobs for exactly those versions.
+          3. Qdrant vectors (whole-doc, or a single version).
+
+        ``version=None`` removes the whole document; a specific ``version``
+        removes just that version. ``user_id`` scopes the delete so an
+        account can only delete its own documents. Raises ``KeyError`` if
+        nothing matching (and owned) exists, so the transport returns 404.
+        """
+        # Ownership + existence check first (raises KeyError -> 404).
+        versions = self._repository.list_versions(document_id)
+        if user_id:
+            versions = [
+                v for v in versions
+                if (getattr(v, "user_id", "__local__") or "__local__") in ("__local__", user_id)
+            ]
+        if not versions:
+            raise KeyError(f"Document {document_id} not found")
+        if version is not None and not any(v.version == version for v in versions):
+            raise KeyError(f"Document {document_id} version {version} not found")
+
+        remaining_before = len(versions)
+        whole_document = version is None or remaining_before == 1
+
+        # 1. Postgres: delete rows, get back the storage keys to purge.
+        storage_keys = self._repository.delete_document(
+            document_id, version=version, user_id=user_id
+        )
+
+        # 2. File storage: best-effort purge of each freed blob. A missing
+        #    file is fine (already gone); log-and-continue on error so one
+        #    bad blob never blocks the rest of the cascade.
+        files_removed = 0
+        for key in storage_keys:
+            try:
+                self._storage.delete(key)
+                files_removed += 1
+            except Exception:  # pragma: no cover - defensive
+                pass
+
+        # 3. Qdrant vectors. delete_document with version=None clears every
+        #    version; with a version it clears just that one.
+        try:
+            self._search.delete_document(
+                document_id,
+                version=None if whole_document else version,
+                user_id=user_id,
+            )
+        except Exception:  # pragma: no cover - vectors may be absent
+            pass
+
+        return {
+            "deleted": True,
+            "document_id": document_id,
+            "scope": "document" if whole_document else "version",
+            "version": version,
+            "versions_removed": len(storage_keys),
+            "files_removed": files_removed,
+        }
 
     def request_sensitive_access(
         self,

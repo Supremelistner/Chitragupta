@@ -323,6 +323,82 @@ def create_app(
         ok = engine.delete_session(session_id)
         return {"deleted": ok}
 
+    # ─── Document management (list + delete for the My Documents panel) ─
+    @app.get("/api/documents")
+    async def list_documents(request: Request):
+        """List the signed-in user's stored documents for the UI panel."""
+        try:
+            docs_user_id = _current_user(request)["sub"]
+        except HTTPException:
+            docs_user_id = None
+        return engine.list_documents(user_id=docs_user_id)
+
+    @app.delete("/api/documents/{document_id}")
+    async def delete_document(document_id: str, request: Request, version: int | None = None):
+        """Delete a stored document (or one version) for the signed-in user.
+
+        ``?version=N`` deletes only that version; omit it to delete the
+        whole document (all versions). Scoped to the caller's user_id so
+        no account can delete another's document. This removes the stored
+        document data itself — distinct from deleting a chat session,
+        which never touches documents.
+        """
+        try:
+            docs_user_id = _current_user(request)["sub"]
+        except HTTPException:
+            docs_user_id = None
+        result = engine.delete_document(document_id, version=version, user_id=docs_user_id)
+        if not result.get("deleted"):
+            # Not found (or not owned) reads as 404; other failures as 502.
+            err = (result.get("error") or "").lower()
+            if "not found" in err:
+                raise HTTPException(status_code=404, detail=result.get("error"))
+            raise HTTPException(status_code=502, detail=result.get("error") or "delete failed")
+        return result
+
+    @app.get("/api/documents/{document_id}/versions/{version}/retrieve")
+    async def retrieve_document(document_id: str, version: int, request: Request, approve: bool = False):
+        """Retrieve a stored document's original file through the approval gate.
+
+        Reuses the same access-policy gate as chat, driven by code (the id
+        comes from the user's own document list, never an LLM). Without
+        ``?approve=true`` a sensitive/private document returns HTTP 202
+        with ``{"status": "requires_confirmation"}`` so the UI can show the
+        two-step confirm. With ``approve=true`` (after the user confirms)
+        the original file streams back as a download.
+        """
+        try:
+            docs_user_id = _current_user(request)["sub"]
+        except HTTPException:
+            docs_user_id = None
+        result = engine.retrieve_document(
+            document_id, version, user_id=docs_user_id, approval_granted=approve,
+        )
+        status = result.get("status")
+        if status == "requires_confirmation":
+            return JSONResponse(status_code=202, content={
+                "status": "requires_confirmation",
+                "document_id": document_id,
+                "version": version,
+            })
+        if status != "ok":
+            msg = result.get("message") or "retrieve failed"
+            code = 404 if "not found" in msg.lower() else 502
+            raise HTTPException(status_code=code, detail=msg)
+        content_b64 = result.get("content_base64") or ""
+        if not content_b64:
+            raise HTTPException(status_code=502, detail="document file is empty")
+        import base64 as _b64
+        from fastapi.responses import Response as _Response
+        blob = _b64.b64decode(content_b64)
+        filename = result.get("filename") or f"{document_id}_v{version}"
+        media_type = result.get("content_type") or "application/octet-stream"
+        return _Response(
+            content=blob,
+            media_type=media_type,
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
     @app.post("/api/sessions/{session_id}/archive")
     async def archive_session(session_id: str, request: Request):
         try:

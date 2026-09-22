@@ -347,6 +347,90 @@ class PostgreSQLRepositoryAdapter(PostgreSQLDocumentRepository):
                 rows = cursor.fetchall()
         return [self._row_to_summary(row) for row in rows]
 
+    def delete_document(
+        self, document_id: str, version: int | None = None, user_id: str | None = None
+    ) -> list[str]:
+        """Delete a document's Postgres rows and return the freed storage keys.
+
+        ``version=None`` deletes every version of the document (and the
+        parent ``documents`` row, whose ON DELETE CASCADE also clears
+        audit_events / document_relationships). A specific ``version``
+        deletes only that version row; if it was the last remaining
+        version the parent row is removed too, otherwise ``latest_version``
+        is recomputed to the highest surviving version.
+
+        ``user_id`` scopes the delete so one account can never remove
+        another account's document. Returns the ``storage_key`` of every
+        version row actually deleted, so the caller can purge the file
+        blobs and Qdrant vectors for exactly those versions.
+        """
+        with self._connection_factory() as conn:
+            with conn.cursor() as cursor:
+                # Collect the storage keys we are about to remove (scoped).
+                if version is not None and user_id:
+                    cursor.execute(
+                        "SELECT storage_key FROM document_versions "
+                        "WHERE document_id = %s AND version = %s AND user_id = %s",
+                        (document_id, version, user_id),
+                    )
+                elif version is not None:
+                    cursor.execute(
+                        "SELECT storage_key FROM document_versions "
+                        "WHERE document_id = %s AND version = %s",
+                        (document_id, version),
+                    )
+                elif user_id:
+                    cursor.execute(
+                        "SELECT storage_key FROM document_versions "
+                        "WHERE document_id = %s AND user_id = %s",
+                        (document_id, user_id),
+                    )
+                else:
+                    cursor.execute(
+                        "SELECT storage_key FROM document_versions "
+                        "WHERE document_id = %s",
+                        (document_id,),
+                    )
+                storage_keys = [r[0] for r in cursor.fetchall() if r and r[0]]
+                if not storage_keys:
+                    # Nothing owned by this user under this id/version.
+                    conn.commit()
+                    return []
+
+                if version is None:
+                    # Whole-document delete: drop the parent row; the FK
+                    # ON DELETE CASCADE removes all versions + audit rows.
+                    cursor.execute(
+                        "DELETE FROM documents WHERE document_id = %s",
+                        (document_id,),
+                    )
+                else:
+                    cursor.execute(
+                        "DELETE FROM document_versions "
+                        "WHERE document_id = %s AND version = %s",
+                        (document_id, version),
+                    )
+                    # Any versions left? If not, remove the parent too.
+                    cursor.execute(
+                        "SELECT COALESCE(MAX(version), 0), COUNT(*) "
+                        "FROM document_versions WHERE document_id = %s",
+                        (document_id,),
+                    )
+                    max_version, remaining = cursor.fetchone()
+                    if not remaining:
+                        cursor.execute(
+                            "DELETE FROM documents WHERE document_id = %s",
+                            (document_id,),
+                        )
+                    else:
+                        cursor.execute(
+                            "UPDATE documents SET latest_version = %s, updated_at = NOW() "
+                            "WHERE document_id = %s",
+                            (int(max_version), document_id),
+                        )
+            conn.commit()
+        return storage_keys
+
     def close(self) -> None:
         return None
 

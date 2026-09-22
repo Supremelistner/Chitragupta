@@ -28,6 +28,10 @@ class PostgreSQLDocumentRepository(Protocol):
 
     def list_documents(self) -> list[DocumentSummaryRecord]: ...
 
+    def delete_document(
+        self, document_id: str, version: int | None = None, user_id: str | None = None
+    ) -> list[str]: ...
+
     def close(self) -> None: ...
 
 

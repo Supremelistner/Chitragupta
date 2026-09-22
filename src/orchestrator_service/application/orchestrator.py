@@ -207,6 +207,129 @@ class OrchestrationEngine:
             logger.warning("list_expiring_documents failed: %s", exc)
             return {"results": []}
 
+    def list_documents(self, user_id: str | None = None) -> dict:
+        """List a user's stored documents for the document panel (no LLM turn).
+
+        Calls the document service directly and scopes to the user. Never
+        raises for transport trouble — returns an empty list so the panel
+        degrades gracefully.
+        """
+        try:
+            target = self._registry.get_service("list_documents")
+            if target is None:
+                return {"results": []}
+            args: dict[str, Any] = {}
+            if user_id:
+                args["user_id"] = user_id
+            result = self._router.call_tool(target, "list_documents", args)
+            if not isinstance(result, dict) or result.get("error"):
+                return {"results": []}
+            return {"results": result.get("results", [])}
+        except Exception as exc:
+            logger.warning("list_documents failed: %s", exc)
+            return {"results": []}
+
+    def delete_document(
+        self,
+        document_id: str,
+        version: int | None = None,
+        user_id: str | None = None,
+    ) -> dict:
+        """Delete a stored document (or one version) across every store.
+
+        Routes to the document service's delete_document tool (which
+        cascades Postgres + file storage + Qdrant), then mirrors the
+        removal to the device-sync hub so a re-synced device does not
+        resurrect it. ``version=None`` deletes the whole document.
+        Returns ``{"deleted": bool, ...}``; ``error`` is set on failure.
+        """
+        target = self._registry.get_service("delete_document")
+        if target is None:
+            return {"deleted": False, "error": "delete_document tool is not registered"}
+        args: dict[str, Any] = {"document_id": document_id}
+        if version is not None:
+            args["version"] = version
+        if user_id:
+            args["user_id"] = user_id
+        result = self._router.call_tool(target, "delete_document", args)
+        if not isinstance(result, dict) or result.get("error"):
+            msg = result.get("message") if isinstance(result, dict) else "delete failed"
+            return {"deleted": False, "error": msg or "delete failed"}
+
+        # Mirror the deletion to the global sync hub (best-effort). Only a
+        # whole-document delete removes the hub entry; a single-version
+        # delete leaves the hub blob for the surviving versions.
+        whole_document = version is None or result.get("scope") == "document"
+        if whole_document and user_id:
+            try:
+                from shared.device_sync import remove_document
+                remove_document(user_id=user_id, document_id=document_id)
+            except Exception:
+                logger.exception("Global sync remove failed (delete kept)")
+        return result
+
+    def retrieve_document(
+        self,
+        document_id: str,
+        version: int,
+        *,
+        user_id: str | None = None,
+        approval_granted: bool = False,
+    ) -> dict:
+        """Retrieve a whole document, honouring the same approval gate as chat.
+
+        This is the code path behind the document panel's "Retrieve" button.
+        It reuses the document service's ``get_document`` tool and its
+        access-policy gate — exactly the loop proven in chat — but drives
+        it deterministically: the document_id/version come from the user's
+        own list_documents, never from an LLM, so there is no hallucinated
+        id risk.
+
+        Returns one of:
+          * {"status": "requires_confirmation", document_id, version, filename?}
+            when the document is sensitive/private and not yet approved, OR
+          * {"status": "ok", filename, content_type, content_base64, ...}
+            when access is allowed (open doc, or approval_granted=True), OR
+          * {"status": "error", message} on failure.
+        """
+        target = self._registry.get_service("get_document")
+        if target is None:
+            return {"status": "error", "message": "get_document tool is not registered"}
+        args: dict[str, Any] = {"document_id": document_id, "version": version}
+        if user_id:
+            args["user_id"] = user_id
+        if approval_granted:
+            args["approve"] = True
+        result = self._router.call_tool(target, "get_document", args)
+        if not isinstance(result, dict):
+            return {"status": "error", "message": "retrieve failed"}
+
+        # The gate answered REQUIRE_APPROVAL / DENY (403 -> error envelope
+        # carrying access_action) — surface it as a confirmation request.
+        action = result.get("access_action")
+        if result.get("error") or action in ("REQUIRE_APPROVAL", "DENY"):
+            if action == "REQUIRE_APPROVAL" or (
+                isinstance(result.get("message"), str)
+                and "approval" in result["message"].lower()
+            ):
+                return {
+                    "status": "requires_confirmation",
+                    "document_id": document_id,
+                    "version": version,
+                }
+            if action == "DENY":
+                return {"status": "error", "message": result.get("access_reason") or "Access denied."}
+            return {"status": "error", "message": result.get("message") or "retrieve failed"}
+
+        return {
+            "status": "ok",
+            "document_id": document_id,
+            "version": version,
+            "filename": result.get("filename"),
+            "content_type": result.get("content_type"),
+            "content_base64": result.get("content_base64"),
+        }
+
     def process_message(
         self, session_id: str, user_message: str, file: dict | None = None,
         user_id: str | None = None,
@@ -751,10 +874,13 @@ class OrchestrationEngine:
         if llm_response.tool_calls:
             return self._execute_tool_calls(session, llm_response)
 
-        # No tool calls — LLM is responding directly
+        # No tool calls — LLM is responding directly. Humanize here too:
+        # this path previously returned raw content, so a JSON/code-fence
+        # answer leaked straight to the user (elderly, often heard aloud).
+        direct_content = _humanize_reply(llm_response.content or "")
         assistant_msg = ConversationMessage(
             role=MessageRole.ASSISTANT,
-            content=llm_response.content,
+            content=direct_content,
             metadata={"reasoning": llm_response.reasoning},
         )
         session.messages.append(assistant_msg)
@@ -762,7 +888,7 @@ class OrchestrationEngine:
 
         return OrchestratorResponse(
             session_id=session.session_id,
-            message=llm_response.content,
+            message=direct_content,
             metadata={
                 "reasoning": llm_response.reasoning,
                 "model": llm_response.model,

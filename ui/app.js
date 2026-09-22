@@ -415,6 +415,9 @@
             item.setAttribute('role', 'listitem');
             item.dataset.sessionId = s.session_id;
 
+            const main = document.createElement('div');
+            main.className = 'session-main';
+
             const title = document.createElement('div');
             title.className = 'session-title';
             title.textContent = s.title || t('nav_new_chat');
@@ -423,15 +426,52 @@
             time.className = 'session-time';
             time.textContent = formatRelativeTime(s.created_at);
 
-            item.appendChild(title);
-            item.appendChild(time);
+            main.appendChild(title);
+            main.appendChild(time);
+
+            // Delete button: two-tap confirm. First tap arms it (row turns
+            // into a confirm affordance); second tap within the window
+            // actually deletes. Deleting a chat NEVER touches uploaded
+            // documents — only the conversation record is removed.
+            const del = document.createElement('button');
+            del.className = 'session-delete btn-icon';
+            del.type = 'button';
+            del.setAttribute('aria-label', t('delete_session'));
+            del.title = t('delete_session');
+            del.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6"/><path d="M10 11v6M14 11v6"/></svg>';
+            del.addEventListener('click', (e) => {
+                e.stopPropagation();
+                if (del.dataset.armed === '1') {
+                    deleteSession(s.session_id);
+                } else {
+                    // Arm this button, disarm any other, auto-disarm after 3s.
+                    els.sessionList.querySelectorAll('.session-delete.armed').forEach((b) => {
+                        b.classList.remove('armed');
+                        b.dataset.armed = '';
+                        b.title = t('delete_session');
+                    });
+                    del.dataset.armed = '1';
+                    del.classList.add('armed');
+                    del.title = t('delete_confirm');
+                    setTimeout(() => {
+                        if (del.dataset.armed === '1') {
+                            del.dataset.armed = '';
+                            del.classList.remove('armed');
+                            del.title = t('delete_session');
+                        }
+                    }, 3000);
+                }
+            });
+
+            item.appendChild(main);
+            item.appendChild(del);
             // Keyboard access: session rows are divs, so expose them
             // to Tab and activate on Enter/Space like a button.
-            item.tabIndex = 0;
-            item.setAttribute('aria-label', s.title || t('nav_new_chat'));
+            main.tabIndex = 0;
+            main.setAttribute('aria-label', s.title || t('nav_new_chat'));
             const activate = () => selectSession(s.session_id);
-            item.addEventListener('click', activate);
-            item.addEventListener('keydown', (e) => {
+            main.addEventListener('click', activate);
+            main.addEventListener('keydown', (e) => {
                 if (e.key === 'Enter' || e.key === ' ') {
                     e.preventDefault();
                     activate();
@@ -471,6 +511,32 @@
     async function refreshSessionList() {
         state.sessions = await listSessions();
         renderSessionList();
+    }
+
+    async function deleteSession(sessionId) {
+        try {
+            const r = await fetch(API + '/api/sessions/' + sessionId, { method: 'DELETE' });
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        } catch (e) {
+            console.error('deleteSession failed', e);
+            appendMessage('assistant', t('error_network'));
+            return;
+        }
+        const wasActive = state.currentSessionId === sessionId;
+        await refreshSessionList();
+        if (wasActive) {
+            // The open chat was deleted: switch to the most recent remaining
+            // session, or start a fresh one if none are left.
+            if (state.sessions.length) {
+                await selectSession(state.sessions[0].session_id);
+            } else {
+                state.currentSessionId = null;
+                els.messages.innerHTML = '';
+                showWelcome();
+                await ensureSession();
+                await applyLanguagePreferenceToCurrentSession();
+            }
+        }
     }
 
     async function selectSession(sessionId) {
@@ -1048,11 +1114,266 @@
         });
     }
 
+    // ─── My Documents panel (in settings) ────────────────────
+    // Reusable promise-based modal helpers. They build a modal on the fly
+    // using the app's existing .modal/.modal-card styling, so they inherit
+    // the theme, large tap targets, and Devanagari font automatically.
+    function _buildModalShell() {
+        const overlay = document.createElement('div');
+        overlay.className = 'modal modal-dynamic';
+        const card = document.createElement('div');
+        card.className = 'modal-card';
+        overlay.appendChild(card);
+        document.body.appendChild(overlay);
+        return { overlay, card };
+    }
+
+    function confirmModal(title, body, confirmLabel, cancelLabel, danger) {
+        return new Promise((resolve) => {
+            const { overlay, card } = _buildModalShell();
+            const h = document.createElement('h1');
+            h.className = 'modal-title';
+            h.textContent = title;
+            card.appendChild(h);
+            if (body) {
+                const p = document.createElement('p');
+                p.className = 'modal-helper';
+                p.textContent = body;
+                card.appendChild(p);
+            }
+            const actions = document.createElement('div');
+            actions.className = 'modal-actions';
+            const cancel = document.createElement('button');
+            cancel.className = 'btn btn-secondary btn-large';
+            cancel.textContent = cancelLabel || t('documents_delete_cancel');
+            const go = document.createElement('button');
+            go.className = 'btn btn-large ' + (danger ? 'btn-danger' : 'btn-primary');
+            go.textContent = confirmLabel || t('confirmation_yes');
+            const done = (val) => { overlay.remove(); resolve(val); };
+            cancel.addEventListener('click', () => done(false));
+            go.addEventListener('click', () => done(true));
+            overlay.addEventListener('click', (e) => { if (e.target === overlay) done(false); });
+            actions.appendChild(cancel);
+            actions.appendChild(go);
+            card.appendChild(actions);
+            setTimeout(() => go.focus(), 50);
+        });
+    }
+
+    function choiceModal(title, options) {
+        return new Promise((resolve) => {
+            const { overlay, card } = _buildModalShell();
+            const h = document.createElement('h1');
+            h.className = 'modal-title';
+            h.textContent = title;
+            card.appendChild(h);
+            const actions = document.createElement('div');
+            actions.className = 'modal-actions modal-actions-stacked';
+            const done = (val) => { overlay.remove(); resolve(val); };
+            for (const opt of options) {
+                const b = document.createElement('button');
+                b.className = 'btn btn-secondary btn-large';
+                b.textContent = opt.label;
+                b.addEventListener('click', () => done(opt.value));
+                actions.appendChild(b);
+            }
+            const cancel = document.createElement('button');
+            cancel.className = 'btn btn-ghost btn-large';
+            cancel.textContent = t('documents_delete_cancel');
+            cancel.addEventListener('click', () => done(null));
+            actions.appendChild(cancel);
+            overlay.addEventListener('click', (e) => { if (e.target === overlay) done(null); });
+            card.appendChild(actions);
+        });
+    }
+
+    function docPanelName(d) {
+        // Prefer the uploaded filename, then a human description/summary,
+        // then a short id. Elderly users recognise "aadhaar.png" fastest.
+        const fname = d.metadata && (d.metadata.filename || d.metadata.original_filename);
+        return fname || d.description || d.summary
+            || (d.document_id ? String(d.document_id).slice(0, 8) + '…' : '—');
+    }
+
+    function docPanelSubtitle(d) {
+        const bits = [];
+        if (d.document_sub_type || d.document_type) bits.push(d.document_sub_type || d.document_type);
+        if (d.owner && d.owner.type && d.owner.type !== 'SELF') {
+            bits.push(d.owner.relation || d.owner.type);
+        }
+        if (d.latest_version && d.latest_version > 1) {
+            bits.push(t('documents_versions', { count: d.latest_version }));
+        }
+        return bits.join(' · ');
+    }
+
+    async function loadDocuments() {
+        const list = document.getElementById('documents-list');
+        if (!list) return;
+        list.innerHTML = '';
+        const loading = document.createElement('div');
+        loading.className = 'documents-empty';
+        loading.textContent = t('documents_loading');
+        list.appendChild(loading);
+        let docs = [];
+        try {
+            const r = await fetch(API + '/api/documents');
+            if (r.ok) {
+                const data = await r.json();
+                docs = (data && data.results) || [];
+            }
+        } catch (e) {
+            console.warn('loadDocuments failed', e);
+        }
+        renderDocuments(docs);
+    }
+
+    function renderDocuments(docs) {
+        const list = document.getElementById('documents-list');
+        if (!list) return;
+        list.innerHTML = '';
+        if (!docs.length) {
+            const empty = document.createElement('div');
+            empty.className = 'documents-empty';
+            empty.textContent = t('documents_empty');
+            list.appendChild(empty);
+            return;
+        }
+        for (const d of docs) {
+            list.appendChild(buildDocRow(d));
+        }
+    }
+
+    function buildDocRow(d) {
+        const row = document.createElement('div');
+        row.className = 'document-item';
+        row.setAttribute('role', 'listitem');
+
+        const info = document.createElement('div');
+        info.className = 'document-info';
+        const name = document.createElement('div');
+        name.className = 'document-name';
+        name.textContent = docPanelName(d);
+        info.appendChild(name);
+        const sub = docPanelSubtitle(d);
+        if (sub) {
+            const subEl = document.createElement('div');
+            subEl.className = 'document-sub';
+            subEl.textContent = sub;
+            info.appendChild(subEl);
+        }
+
+        const actions = document.createElement('div');
+        actions.className = 'document-actions';
+
+        const retrieveBtn = document.createElement('button');
+        retrieveBtn.type = 'button';
+        retrieveBtn.className = 'btn btn-secondary btn-doc';
+        retrieveBtn.textContent = t('documents_retrieve');
+        retrieveBtn.addEventListener('click', () => retrieveDocument(d, retrieveBtn));
+
+        const deleteBtn = document.createElement('button');
+        deleteBtn.type = 'button';
+        deleteBtn.className = 'btn btn-danger btn-doc';
+        deleteBtn.textContent = t('documents_delete');
+        deleteBtn.addEventListener('click', () => openDeleteChooser(d, row));
+
+        actions.appendChild(retrieveBtn);
+        actions.appendChild(deleteBtn);
+        row.appendChild(info);
+        row.appendChild(actions);
+        return row;
+    }
+
+    // Retrieve reuses the proven approval gate: the server answers 202
+    // "requires_confirmation" for sensitive papers; we then show a confirm
+    // and re-request with approve=true, which streams the original file.
+    async function retrieveDocument(d, btn) {
+        const version = d.latest_version || 1;
+        const base = API + '/api/documents/' + encodeURIComponent(d.document_id)
+            + '/versions/' + version + '/retrieve';
+        const original = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = t('documents_retrieving');
+        try {
+            let r = await fetch(base);
+            if (r.status === 202) {
+                // Gate wants explicit approval — ask, then approve.
+                btn.disabled = false;
+                btn.textContent = original;
+                const ok = await confirmModal(
+                    t('documents_retrieve_confirm_title'),
+                    t('documents_retrieve_confirm_body'),
+                    t('documents_retrieve_go'),
+                );
+                if (!ok) return;
+                btn.disabled = true;
+                btn.textContent = t('documents_retrieving');
+                r = await fetch(base + '?approve=true');
+            }
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            const blob = await r.blob();
+            const url = URL.createObjectURL(blob);
+            window.open(url, '_blank');
+            setTimeout(() => URL.revokeObjectURL(url), 60000);
+        } catch (e) {
+            console.error('retrieveDocument failed', e);
+            alert(t('documents_retrieve_failed'));
+        } finally {
+            btn.disabled = false;
+            btn.textContent = original;
+        }
+    }
+
+    // Delete: step 1 asks which scope (this version vs whole document),
+    // step 2 is a two-tap confirm. Both are required before anything is sent.
+    async function openDeleteChooser(d, row) {
+        const hasMultiple = (d.latest_version || 1) > 1;
+        let scope = 'all';
+        if (hasMultiple) {
+            const choice = await choiceModal(
+                t('documents_delete_which'),
+                [
+                    { value: 'version', label: t('documents_delete_this_version') },
+                    { value: 'all', label: t('documents_delete_all_versions') },
+                ],
+            );
+            if (!choice) return;
+            scope = choice;
+        }
+        const ok = await confirmModal(
+            t('documents_delete_confirm_title'),
+            t('documents_delete_confirm_body'),
+            t('documents_delete_go'),
+            t('documents_delete_cancel'),
+            true,
+        );
+        if (!ok) return;
+        await deleteDocument(d, scope, row);
+    }
+
+    async function deleteDocument(d, scope, row) {
+        let url = API + '/api/documents/' + encodeURIComponent(d.document_id);
+        if (scope === 'version') url += '?version=' + (d.latest_version || 1);
+        try {
+            const r = await fetch(url, { method: 'DELETE' });
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            // Reload the list so version counts / removals reflect reality.
+            await loadDocuments();
+        } catch (e) {
+            console.error('deleteDocument failed', e);
+            alert(t('documents_delete_failed'));
+        }
+    }
+
     // ─── Settings drawer ─────────────────────────────────────
     function openSettings() {
         if (state.profile) els.settingsNameInput.value = state.profile.display_name;
         els.settingsDrawer.hidden = false;
         setTimeout(() => els.settingsNameInput.focus(), 50);
+        // Load the document panel each time settings opens, so it reflects
+        // any uploads/deletes since last time.
+        loadDocuments();
     }
     function closeSettings() {
         els.settingsDrawer.hidden = true;

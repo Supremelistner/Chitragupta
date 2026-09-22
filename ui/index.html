@@ -84,6 +84,16 @@
                     <button type="submit" class="btn btn-primary" data-i18n="settings_save">सहेजें</button>
                 </div>
             </form>
+
+            <!-- My Documents: list stored papers, open (gated) or delete each -->
+            <div class="settings-divider" aria-hidden="true"></div>
+            <div class="documents-section">
+                <h3 class="documents-heading" data-i18n="settings_documents">मेरे कागज़ात</h3>
+                <p class="documents-hint" data-i18n="settings_documents_hint">आपके सहेजे हुए कागज़।</p>
+                <div class="documents-list" id="documents-list" role="list">
+                    <!-- populated by JS -->
+                </div>
+            </div>
         </div>
     </div>
 

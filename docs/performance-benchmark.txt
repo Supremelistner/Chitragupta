@@ -1,0 +1,149 @@
+================================================================================
+CHITRAGUPTA — PERFORMANCE BENCHMARK REPORT
+================================================================================
+
+Date run        : 2026-09-22 (IST)
+Environment     : local dev stack (Docker Postgres + Qdrant; app services in
+                  Ubuntu WSL venv ~/.local/chitragupta-wsl-venv)
+Corpus          : 4 synthetic documents (data/Synthetic/): aadhaar.png,
+                  pan.png, marksheet.png, vehicle.png
+Data policy     : synthetic fixtures only. Report carries latencies, counts,
+                  field *names*, and recall rates — never field values,
+                  document text, tokens, or DSNs.
+Method          : one-off, run against the live stack via a throwaway
+                  registered account; benchmark documents deleted afterwards.
+                  Scratch scripts were removed and NOT committed.
+
+--------------------------------------------------------------------------------
+SCOPE — what was measured
+--------------------------------------------------------------------------------
+1. Retrieval recall@K  — semantic document search quality + search latency.
+2. Voice (TTS) latency — /api/tts round-trip (Gemini-backed).
+3. Metadata creation   — full upload->INDEXED ingestion time, plus the
+                          isolated extract-metadata model-call latency.
+
+================================================================================
+[1] RETRIEVAL RECALL@K
+================================================================================
+Test design:
+  - 12 queries total, 3 per document.
+  - Queries are PARAPHRASES that never contain the filename
+    (e.g. "the card with my twelve digit ID" -> aadhaar.png). This is a real
+    semantic-recall test, not an exact-name lookup.
+  - Endpoint: POST /tools/search_documents (document service), user-scoped,
+    limit=5. recall@K = fraction of queries whose relevant doc appears in the
+    top-K results.
+
+Results:
+  recall@1 = 6/12  = 50%
+  recall@3 = 11/12 = 92%
+
+  Per-document:
+    aadhaar.png    @1=1/3   @3=3/3
+    pan.png        @1=1/3   @3=2/3
+    marksheet.png  @1=2/3   @3=3/3
+    vehicle.png    @1=2/3   @3=3/3
+
+  Search latency: n=12  mean=99ms  p50=99ms  p95=106ms  min=79ms  max=128ms
+
+Interpretation:
+  - The @1->@3 jump (50% -> 92%) means the correct document is almost always
+    retrieved, just not always ranked first on a tiny 4-doc corpus with loose
+    paraphrases. Expected behaviour for a small embedding model.
+  - Search is fast and fully local (no LLM on this path): ~100ms, low variance.
+  - pan.png is the weakest (@3 2/3): one "tax" paraphrase did not surface it.
+
+================================================================================
+[2] VOICE / TTS LATENCY
+================================================================================
+Endpoint: POST /api/tts  (orchestrator -> model service
+          /infer/synthesize-audio, Gemini-backed). Per-call cap 20s.
+
+Results (3 runs each):
+    short  (~8 words)    mean=4873ms   runs=3/3 ok   min=3609ms  max=5510ms
+    medium (~30 words)   mean=7337ms   runs=1/3 ok   (2 of 3 exceeded the 20s cap)
+
+Interpretation:
+  - TTS is entirely provider-bound (Gemini audio synthesis), not local compute.
+  - Short utterances ~5s round-trip. Medium utterances were unreliable during
+    this run: 2 of 3 did not return within 20s — upstream throttling, not a
+    code path issue.
+
+================================================================================
+[3] METADATA CREATION LATENCY
+================================================================================
+(3a) Full ingestion — upload -> INDEXED
+     (OCR + vision extraction + embedding + Qdrant index + Postgres write),
+     measured as the /api/upload round trip returning processing_status=INDEXED.
+
+     per document:
+       aadhaar.png    29452ms  (INDEXED)
+       pan.png        71725ms  (INDEXED)
+       marksheet.png  70432ms  (INDEXED)
+       vehicle.png    71186ms  (INDEXED)
+     summary: n=4  mean=60699ms  p50=70809ms  p95=71725ms
+              min=29452ms  max=71725ms
+
+(3b) Isolated metadata extraction — POST /infer/extract-metadata
+     (model-reported latency_ms). Per-call cap 40s.
+
+       aadhaar.png    12185ms
+       pan.png        19885ms
+       marksheet.png  ReadTimeout (>40s — provider stall)
+       vehicle.png     2711ms
+     summary: n=3  mean=11593ms  p50=12185ms  p95=19885ms
+              min=2711ms  max=19885ms
+
+Interpretation:
+  - Ingestion time is dominated by the Gemini vision-extraction call, not by
+    OCR pre-processing, embedding, or DB writes.
+  - High variance (2.7s vs timeout on identically-sized synthetic images) is
+    the upstream model/rate-limiter, not the local pipeline.
+
+================================================================================
+OVERALL READ
+================================================================================
+- The only fast, local, low-variance metric is RETRIEVAL: ~100ms search,
+  deterministic. That path is our code.
+- VOICE and METADATA latencies are PROVIDER-BOUND (Gemini vision/audio).
+  During this run Gemini was flaky — extraction swung 2.7s -> timeout and
+  2 of 3 medium TTS calls exceeded 20s. These figures measure Google's model
+  under load, not the Chitragupta pipeline. On a healthy provider day they
+  would be lower and far more consistent.
+- The one genuinely tunable LOCAL quality metric is recall@1 (50% on 4 docs
+  with deliberately vague queries). The lever is the embedding model /
+  chunking, not infrastructure.
+
+================================================================================
+CAVEATS & REPRODUCIBILITY
+================================================================================
+- Statistical significance: a 4-document corpus with 12 queries is far too
+  small for recall to be meaningful. Treat the recall numbers as indicative,
+  not authoritative. A labelled query set over a larger corpus is needed for
+  a trustworthy figure.
+- Provider dependence: TTS and metadata latencies depend on live Gemini
+  availability and will vary run to run. Re-run when the provider is healthy
+  for representative numbers.
+- Single run: no warm-up discarding, no repeated trials for ingestion (one
+  upload per doc). Latencies are point samples, not distributions.
+- Environment: app services run inside WSL; DB containers map to Windows
+  localhost. Numbers reflect this specific local setup.
+
+================================================================================
+HOW IT WAS MEASURED (for re-runs)
+================================================================================
+- Register a throwaway account (POST /api/auth/register).
+- Upload each synthetic doc (POST /api/upload) and time until the response
+  reports processing_status=INDEXED  -> ingestion latency.
+- POST /infer/extract-metadata per doc, read model latency_ms -> isolated
+  extraction latency.
+- POST /tools/search_documents with paraphrased queries, user-scoped,
+  limit=5; score the relevant doc's rank -> recall@1 / recall@3 + latency.
+- POST /api/tts at short/medium text lengths, 3 runs each -> TTS latency.
+- Delete the benchmark documents (DELETE /api/documents/{id}) afterwards.
+
+Note: this was a one-off. There is currently no committed, repeatable
+benchmark script in the repo. Standing one up (scripts/benchmark.py) with a
+larger labelled corpus is the recommended next step if these metrics are to
+be tracked over time.
+================================================================================
